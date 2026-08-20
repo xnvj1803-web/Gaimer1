@@ -1,0 +1,16 @@
+{
+  "name": "gamai-baifen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "盖帽/百分 四人联机纸牌游戏（服务端 + 浏览器客户端）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
