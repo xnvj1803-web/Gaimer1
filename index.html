@@ -339,18 +339,22 @@
     position: absolute; left: 50%; top: 50%;
     transform: translate(-50%, -50%);
     display: flex; flex-direction: column; align-items: center; gap: 2px;
-    background: rgba(255,255,255,.94); border-radius: 14px; padding: 8px 10px;
+    background: rgba(255,255,255,.95); border-radius: 16px; padding: 10px 14px;
     box-shadow: 0 6px 20px rgba(0,0,0,.35); z-index: 40; pointer-events: none;
     animation: emojiFloat 3.6s ease forwards;
   }
-  .emoji-bubble img { width: 64px; height: 64px; object-fit: contain; }
-  .emoji-bubble .emoji-label { font-size: 12px; color: #37474f; font-weight: bold; }
+  .emoji-bubble img { width: 96px; height: 96px; object-fit: contain; }
+  .emoji-bubble .emoji-label { font-size: 13px; color: #37474f; font-weight: bold; }
   @keyframes emojiFloat {
     0% { opacity: 0; transform: translate(-50%, -20%) scale(.6); }
     12% { opacity: 1; transform: translate(-50%, -50%) scale(1.05); }
     20% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
     82% { opacity: 1; }
     100% { opacity: 0; transform: translate(-50%, -70%) scale(.9); }
+  }
+  /* 表情气泡层：全屏覆盖，气泡定位到接收者座位旁 */
+  #emojiBubbleLayer {
+    position: fixed; inset: 0; pointer-events: none; z-index: 350; overflow: hidden;
   }
 
   /* ================= 手机端适配（仅影响 ≤768px，电脑端保持不变） ================= */
@@ -433,8 +437,8 @@
     #emojiGrid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 6px; }
     .emoji-thumb { width: 52px; height: 52px; }
     #emojiTargets .emoji-target-btns { gap: 6px; }
-    .emoji-bubble img { width: 52px; height: 52px; }
-    .emoji-bubble .emoji-label { font-size: 11px; }
+    .emoji-bubble img { width: 76px; height: 76px; }
+    .emoji-bubble .emoji-label { font-size: 12px; }
 
     /* 横屏手机：进一步压缩高度 */
     @media (orientation: landscape) {
@@ -517,6 +521,8 @@
     <div class="hint" id="emojiTargetHint">选择发送对象</div>
   </div>
 </div>
+
+<div id="emojiBubbleLayer"></div>
 
 <div id="toastWrap"></div>
 
@@ -1139,7 +1145,7 @@ function sendEmoji(target) {
 }
 
 function showEmojiBubble(msg) {
-  const layer = $('centerArea');
+  const layer = $('emojiBubbleLayer');
   const bubble = document.createElement('div');
   bubble.className = 'emoji-bubble';
   const img = document.createElement('img');
@@ -1153,6 +1159,31 @@ function showEmojiBubble(msg) {
   label.textContent = fromLabel + '→' + toLabel;
   bubble.appendChild(img);
   bubble.appendChild(label);
+
+  // 定位到接收者座位旁边（按当前玩家视角映射），发送给所有人则放中央
+  const view = VIEW[mySeat] || VIEW.south;
+  let anchor = null;
+  if (msg.to === 'all') {
+    const area = $('centerArea').getBoundingClientRect();
+    anchor = { x: area.left + area.width / 2, y: area.top + area.height / 2 };
+  } else {
+    const pos = Object.keys(view).find((p) => view[p] === msg.to);
+    const el = pos ? $('seat-' + pos) : null;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      anchor = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      // 让气泡停在座位旁边而不是盖住名牌：上/下/左/右分别向外偏移
+      if (pos === 'top') anchor.y += 52;
+      else if (pos === 'bottom') anchor.y -= 52;
+      else if (pos === 'left') anchor.x += 52;
+      else if (pos === 'right') anchor.x -= 52;
+    }
+  }
+  if (anchor) {
+    bubble.style.left = anchor.x + 'px';
+    bubble.style.top = anchor.y + 'px';
+  }
+
   // 多个气泡错开排列
   const n = layer.querySelectorAll('.emoji-bubble').length % 5;
   bubble.style.marginLeft = (n * 12) + 'px';
