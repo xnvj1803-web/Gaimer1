@@ -31,6 +31,9 @@ const path = require('path');
 
 const PORT = parseInt(process.env.PORT, 10) || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
+// 断线玩家自动操作延时 / 离线踢出延时（测试时可缩短）
+const AUTO_ACT_DELAY = parseInt(process.env.AUTO_ACT_DELAY, 10) || 30000;
+const KICK_DELAY = parseInt(process.env.KICK_DELAY, 10) || 120000;
 
 const SEATS = ['south', 'west', 'north', 'east'];
 const SUITS = ['S', 'H', 'D', 'C'];
@@ -176,15 +179,22 @@ function scoreRound(bid, p) {
 function publicPlayers(room) {
   const players = {};
   for (const seat of SEATS) {
-    players[seat] = room.players[seat]
-      ? { name: room.names[seat], connected: true }
+    const rec = room.players[seat];
+    players[seat] = rec
+      ? { name: room.names[seat], connected: rec.online }
       : { name: room.names[seat] || null, connected: false };
   }
   return players;
 }
 
 function publicState(room) {
-  const base = { phase: 'waiting', players: publicPlayers(room) };
+  const base = {
+    phase: 'waiting',
+    players: publicPlayers(room),
+    scores: room.match ? room.match.scores : { ns: 0, ew: 0 },
+    matchWins: room.stats ? room.stats.matchWins : { ns: 0, ew: 0 },
+    gameCount: room.match ? room.match.gameCount : 0
+  };
   const g = room.game;
   if (!g) return base;
   return {
@@ -235,14 +245,24 @@ function sendError(ws, text) {
   send(ws, { type: 'error', text });
 }
 
+function playerWs(room, seat) {
+  const rec = room.players[seat];
+  return rec ? rec.ws : null;
+}
+
+function sendToSeat(room, seat, msg) {
+  send(playerWs(room, seat), msg);
+}
+
 function broadcast(room, msg) {
   for (const seat of SEATS) {
-    if (room.players[seat]) send(room.players[seat], msg);
+    sendToSeat(room, seat, msg);
   }
 }
 
 function broadcastState(room) {
   broadcast(room, { type: 'state', public: publicState(room) });
+  scheduleTurnAutoAct(room);
 }
 
 function broadcastRoom(room) {
@@ -252,6 +272,10 @@ function broadcastRoom(room) {
 
 function seatName(room, seat) {
   return room.names[seat] ? `${room.names[seat]}（${SEAT_LABELS[seat]}家）` : SEAT_LABELS[seat] + '家';
+}
+
+function genPlayerId() {
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
 /**
@@ -317,7 +341,7 @@ function dealNewRound(room) {
   };
   room.game = g;
   for (const seat of SEATS) {
-    send(room.players[seat], { type: 'hand', cards: sortCards(hands[seat]) });
+    sendToSeat(room, seat, { type: 'hand', cards: sortCards(hands[seat]) });
   }
   broadcast(room, { type: 'notice', text: `第${room.match.gameCount + 1}局开始，${seatName(room, firstBidder)}先叫分` });
   broadcastState(room);
@@ -330,15 +354,24 @@ function startNewGame(room) {
 }
 
 function assignSeat(room, ws, name, seat) {
-  room.players[seat] = ws;
+  const playerId = genPlayerId();
+  room.players[seat] = { ws, playerId, name, online: true, offlineAt: null, autoTimer: null, kickTimer: null };
   room.names[seat] = name;
+  ws.playerId = playerId;
   ws.roomCode = room.code;
   ws.seat = seat;
-  send(ws, { type: 'init', room: room.code, seat, name, hand: [] });
+  send(ws, { type: 'init', room: room.code, seat, name, hand: [], playerId });
   broadcastRoom(room);
   if (SEATS.every((s) => room.players[s]) && !room.game) {
-    broadcast(room, { type: 'notice', text: '房间已满，自动发牌！' });
-    startNewGame(room);
+    if (room.nextStart === 'resume') {
+      room.nextStart = null;
+      broadcast(room, { type: 'notice', text: '房间已满，从当前分数接续，自动发牌！' });
+      dealNewRound(room);
+    } else {
+      room.nextStart = null;
+      broadcast(room, { type: 'notice', text: '房间已满，自动发牌！' });
+      startNewGame(room);
+    }
   }
 }
 
@@ -358,7 +391,7 @@ function finishBidding(room, dealer) {
     g.pickupTarget = dealer;
     g.discarder = dealer;
     g.phase = 'discard';
-    send(room.players[dealer], { type: 'hand', cards: g.hands[dealer].slice() });
+    sendToSeat(room, dealer, { type: 'hand', cards: g.hands[dealer].slice() });
     broadcast(room, {
       type: 'notice',
       text: `${seatName(room, dealer)} 以 ${g.bid} 分坐庄，补入6张底牌，请先从手中弃掉6张（不公开）`
@@ -521,7 +554,7 @@ function handleJoin(ws, msg) {
   }
   let room = rooms.get(code);
   if (!room) {
-  room = { code, players: {}, names: {}, game: null, match: null, stats: { matchWins: { ns: 0, ew: 0 } } };
+  room = { code, players: {}, names: {}, game: null, match: null, stats: { matchWins: { ns: 0, ew: 0 } }, nextStart: null };
     rooms.set(code, room);
   }
   const freeSeat = SEATS.find((s) => !room.players[s]);
@@ -532,38 +565,20 @@ function handleJoin(ws, msg) {
   assignSeat(room, ws, name, freeSeat);
 }
 
-function handleCall(ws, room, msg) {
+function performCall(room, seat, score) {
   const g = room.game;
-  if (!g || g.phase !== 'bidding') {
-    sendError(ws, '当前不是叫分阶段');
-    return;
-  }
-  if (g.turn !== ws.seat) {
-    sendError(ws, '还没轮到你叫分');
-    return;
-  }
-  const isPass = msg.pass === true || msg.score === 0 || msg.score === 'pass';
+  if (!g || g.phase !== 'bidding' || g.turn !== seat) return;
+  const isPass = score === 0 || score === 'pass';
   if (isPass) {
-    if (g.bid === 0) {
-      // 每局首位叫分者不能弃权
-      sendError(ws, '你是本局第一位叫分者，不能放弃，必须叫分（最低80）');
-      return;
-    }
-    g.acted[ws.seat] = true;
+    if (g.bid === 0) return; // 首位叫分者不能放弃
+    g.acted[seat] = true;
   } else {
-    if (!ALLOWED_BIDS.includes(msg.score)) {
-      sendError(ws, '叫分无效，只能叫 80/85/90/95/100');
-      return;
-    }
-    if (msg.score <= g.bid) {
-      sendError(ws, '叫分必须高于当前叫分（至少加5分）');
-      return;
-    }
-    g.bid = msg.score;
-    g.bidder = ws.seat;
-    g.acted[ws.seat] = true;
-    if (msg.score === 100) {
-      finishBidding(room, ws.seat);
+    if (!ALLOWED_BIDS.includes(score) || score <= g.bid) return;
+    g.bid = score;
+    g.bidder = seat;
+    g.acted[seat] = true;
+    if (score === 100) {
+      finishBidding(room, seat);
       return;
     }
   }
@@ -573,119 +588,68 @@ function handleCall(ws, room, msg) {
     finishBidding(room, g.bidder);
     return;
   }
-  let next = NEXT_SEAT[ws.seat];
+  let next = NEXT_SEAT[seat];
   while (!unacted.includes(next)) next = NEXT_SEAT[next];
   g.turn = next;
   broadcastState(room);
   broadcast(room, { type: 'turn', player: g.turn });
 }
 
-function handleTrump(ws, room, msg) {
+function performTrump(room, seat, suit) {
   const g = room.game;
-  if (!g || g.phase !== 'trump') {
-    sendError(ws, '当前不是选择主牌阶段');
-    return;
-  }
-  if (ws.seat !== g.dealer) {
-    sendError(ws, '只有庄家能选择主牌');
-    return;
-  }
-  if (!SUITS.includes(msg.suit)) {
-    sendError(ws, '主牌花色无效');
-    return;
-  }
-  g.trump = msg.suit;
+  if (!g || g.phase !== 'trump' || seat !== g.dealer || !SUITS.includes(suit)) return;
+  g.trump = suit;
   g.phase = 'playing';
   g.round = 1;
   g.turn = g.dealer;
-  broadcast(room, { type: 'notice', text: `主牌为 ${msg.suit}，庄家先出牌` });
+  broadcast(room, { type: 'notice', text: `主牌为 ${suit}，庄家先出牌` });
   broadcastState(room);
   broadcast(room, { type: 'turn', player: g.turn });
 }
 
-function handlePickup(ws, room, msg) {
+function performPickup(room, seat, target) {
   const g = room.game;
-  if (!g || g.phase !== 'pickup_choose') {
-    sendError(ws, '当前不是补牌阶段');
-    return;
-  }
-  if (!g.dealerTeam.includes(ws.seat)) {
-    sendError(ws, '只有庄家方能决定补牌');
-    return;
-  }
-  if (!g.dealerTeam.includes(msg.player)) {
-    sendError(ws, '补牌对象无效');
-    return;
-  }
-  g.pickupTarget = msg.player;
-  g.hands[msg.player].push(...g.bottom);
-  g.hands[msg.player] = sortCards(g.hands[msg.player]);
-  g.discarder = msg.player;
+  if (!g || g.phase !== 'pickup_choose' || !g.dealerTeam.includes(seat) || !g.dealerTeam.includes(target)) return;
+  g.pickupTarget = target;
+  g.hands[target].push(...g.bottom);
+  g.hands[target] = sortCards(g.hands[target]);
+  g.discarder = target;
   g.phase = 'discard';
-  g.turn = msg.player;
-  send(room.players[msg.player], { type: 'hand', cards: g.hands[msg.player].slice() });
-  broadcast(room, { type: 'notice', text: `${seatName(room, msg.player)} 补入6张底牌，请先从手中弃掉6张（将公开）` });
+  g.turn = target;
+  sendToSeat(room, target, { type: 'hand', cards: g.hands[target].slice() });
+  broadcast(room, { type: 'notice', text: `${seatName(room, target)} 补入6张底牌，请先从手中弃掉6张（将公开）` });
   broadcastState(room);
-  broadcast(room, { type: 'turn', player: msg.player });
+  broadcast(room, { type: 'turn', player: target });
 }
 
-function handleDiscard(ws, room, msg) {
+function performDiscard(room, seat, cards) {
   const g = room.game;
-  if (!g || g.phase !== 'discard') {
-    sendError(ws, '当前不是弃牌阶段');
-    return;
-  }
-  if (ws.seat !== g.discarder) {
-    sendError(ws, '还没轮到你弃牌');
-    return;
-  }
-  const cards = Array.isArray(msg.cards) ? msg.cards : [];
-  if (cards.length !== 6) {
-    sendError(ws, '必须正好弃掉6张牌');
-    return;
-  }
-  const hand = g.hands[ws.seat];
+  if (!g || g.phase !== 'discard' || seat !== g.discarder) return;
+  if (!Array.isArray(cards) || cards.length !== 6) return;
+  const hand = g.hands[seat];
   for (const c of cards) {
-    if (typeof c !== 'string' || !hand.includes(c)) {
-      sendError(ws, '弃牌中包含你手中没有的牌');
-      return;
-    }
+    if (typeof c !== 'string' || !hand.includes(c)) return;
   }
   for (const c of cards) hand.splice(hand.indexOf(c), 1);
   g.discardCards = cards.slice();
   g.phase = 'trump';
   g.turn = g.dealer;
-  send(ws, { type: 'hand', cards: hand.slice() });
+  sendToSeat(room, seat, { type: 'hand', cards: hand.slice() });
   broadcast(room, {
     type: 'notice',
     text: g.bottomRevealed
-      ? `${seatName(room, ws.seat)} 弃牌完成（已公开），庄家请选择主牌花色`
-      : `${seatName(room, ws.seat)} 弃牌完成，庄家请选择主牌花色`
+      ? `${seatName(room, seat)} 弃牌完成（已公开），庄家请选择主牌花色`
+      : `${seatName(room, seat)} 弃牌完成，庄家请选择主牌花色`
   });
   broadcastState(room);
   broadcast(room, { type: 'turn', player: g.dealer });
 }
 
-function handlePlay(ws, room, msg) {
+function performPlay(room, seat, card) {
   const g = room.game;
-  if (!g || g.phase !== 'playing') {
-    sendError(ws, '当前不是出牌阶段');
-    return;
-  }
-  if (g.turn !== ws.seat) {
-    sendError(ws, '还没轮到你出牌');
-    return;
-  }
-  const card = String(msg.card || '');
-  const hand = g.hands[ws.seat];
-  if (!hand.includes(card)) {
-    sendError(ws, '你手中没有这张牌');
-    return;
-  }
-  if (!canPlayCard(hand, card, g.ledSuit, g.trump)) {
-    sendError(ws, '你有同花色牌，必须跟同花色');
-    return;
-  }
+  if (!g || g.phase !== 'playing' || g.turn !== seat) return;
+  const hand = g.hands[seat];
+  if (!hand.includes(card) || !canPlayCard(hand, card, g.ledSuit, g.trump)) return;
   hand.splice(hand.indexOf(card), 1);
   if (g.trickOrder.length === 4) {
     // 上一墩的四张牌仍在展示，赢家打出下一墩第一张牌时清掉（其余情况无需清空）
@@ -693,20 +657,102 @@ function handlePlay(ws, room, msg) {
     g.trickWinner = null;
     g.trickOrder = [];
   }
-  g.trick[ws.seat] = card;
-  g.trickOrder.push(ws.seat);
-  send(ws, { type: 'hand', cards: hand.slice() });
+  g.trick[seat] = card;
+  g.trickOrder.push(seat);
+  sendToSeat(room, seat, { type: 'hand', cards: hand.slice() });
   if (g.trickOrder.length === 1) {
     // 大小王在确定主牌后视为主牌花色，领出王即领出主牌
     g.ledSuit = isJoker(card) ? g.trump : cardSuit(card);
   }
   if (g.trickOrder.length < 4) {
-    g.turn = NEXT_SEAT[ws.seat];
+    g.turn = NEXT_SEAT[seat];
     broadcastState(room);
     broadcast(room, { type: 'turn', player: g.turn });
     return;
   }
   resolveTrick(room);
+}
+
+function performClaimVote(room, seat, agree) {
+  const g = room.game;
+  if (!g || g.phase !== 'claim' || g.claimVotes[seat] !== null) return;
+  g.claimVotes[seat] = agree === true;
+  broadcastState(room);
+  if (!SEATS.every((s) => g.claimVotes[s] !== null)) return;
+
+  const allAgree = SEATS.every((s) => g.claimVotes[s] === true);
+  if (!allAgree) {
+    g.phase = 'playing';
+    g.claimVotes = null;
+    broadcast(room, { type: 'notice', text: '成牌申请被拒绝，游戏继续（已公开的手牌保持公开）' });
+    broadcastState(room);
+    return;
+  }
+
+  // 全部同意：本局按正常规则提前结束
+  broadcast(room, { type: 'notice', text: '所有玩家一致认同，庄家方成牌！本局提前结束' });
+  if (g.bid === 100) {
+    const dealerTeamKey = TEAM_OF_SEAT[g.dealer];
+    const nonDealerTeamKey = OTHER_TEAM[dealerTeamKey];
+    if (g.p >= 5) {
+      endMatch(room, nonDealerTeamKey, '板百：非庄家得分≥5');
+    } else {
+      endMatch(room, dealerTeamKey, '板百：庄家成牌（干推）');
+    }
+    return;
+  }
+  settleRegularRound(room);
+}
+
+function handleCall(ws, room, msg) {
+  const g = room.game;
+  if (!g || g.phase !== 'bidding') { sendError(ws, '当前不是叫分阶段'); return; }
+  if (g.turn !== ws.seat) { sendError(ws, '还没轮到你叫分'); return; }
+  const isPass = msg.pass === true || msg.score === 0 || msg.score === 'pass';
+  if (isPass && g.bid === 0) { sendError(ws, '你是本局第一位叫分者，不能放弃，必须叫分（最低80）'); return; }
+  if (!isPass && !ALLOWED_BIDS.includes(msg.score)) { sendError(ws, '叫分无效，只能叫 80/85/90/95/100'); return; }
+  if (!isPass && msg.score <= g.bid) { sendError(ws, '叫分必须高于当前叫分（至少加5分）'); return; }
+  performCall(room, ws.seat, isPass ? 0 : msg.score);
+}
+
+function handleTrump(ws, room, msg) {
+  const g = room.game;
+  if (!g || g.phase !== 'trump') { sendError(ws, '当前不是选择主牌阶段'); return; }
+  if (ws.seat !== g.dealer) { sendError(ws, '只有庄家能选择主牌'); return; }
+  if (!SUITS.includes(msg.suit)) { sendError(ws, '主牌花色无效'); return; }
+  performTrump(room, ws.seat, msg.suit);
+}
+
+function handlePickup(ws, room, msg) {
+  const g = room.game;
+  if (!g || g.phase !== 'pickup_choose') { sendError(ws, '当前不是补牌阶段'); return; }
+  if (!g.dealerTeam.includes(ws.seat)) { sendError(ws, '只有庄家方能决定补牌'); return; }
+  if (!g.dealerTeam.includes(msg.player)) { sendError(ws, '补牌对象无效'); return; }
+  performPickup(room, ws.seat, msg.player);
+}
+
+function handleDiscard(ws, room, msg) {
+  const g = room.game;
+  if (!g || g.phase !== 'discard') { sendError(ws, '当前不是弃牌阶段'); return; }
+  if (ws.seat !== g.discarder) { sendError(ws, '还没轮到你弃牌'); return; }
+  const cards = Array.isArray(msg.cards) ? msg.cards : [];
+  if (cards.length !== 6) { sendError(ws, '必须正好弃掉6张牌'); return; }
+  const hand = g.hands[ws.seat];
+  for (const c of cards) {
+    if (typeof c !== 'string' || !hand.includes(c)) { sendError(ws, '弃牌中包含你手中没有的牌'); return; }
+  }
+  performDiscard(room, ws.seat, cards);
+}
+
+function handlePlay(ws, room, msg) {
+  const g = room.game;
+  if (!g || g.phase !== 'playing') { sendError(ws, '当前不是出牌阶段'); return; }
+  if (g.turn !== ws.seat) { sendError(ws, '还没轮到你出牌'); return; }
+  const card = String(msg.card || '');
+  const hand = g.hands[ws.seat];
+  if (!hand.includes(card)) { sendError(ws, '你手中没有这张牌'); return; }
+  if (!canPlayCard(hand, card, g.ledSuit, g.trump)) { sendError(ws, '你有同花色牌，必须跟同花色'); return; }
+  performPlay(room, ws.seat, card);
 }
 
 /** 庄家方申请“成牌”：公开申请人手牌，进入全员表决（仅限每墩之间）。 */
@@ -735,41 +781,9 @@ function handleClaim(ws, room) {
 /** 成牌表决：全部同意则按正常计分提前结束本局；有人不同意则继续出牌。 */
 function handleClaimVote(ws, room, msg) {
   const g = room.game;
-  if (!g || g.phase !== 'claim') {
-    sendError(ws, '当前不是成牌表决阶段');
-    return;
-  }
-  if (g.claimVotes[ws.seat] !== null) {
-    sendError(ws, '你已经表决过了');
-    return;
-  }
-  g.claimVotes[ws.seat] = msg.agree === true;
-  broadcastState(room);
-  if (!SEATS.every((s) => g.claimVotes[s] !== null)) return;
-
-  const allAgree = SEATS.every((s) => g.claimVotes[s] === true);
-  if (!allAgree) {
-    g.phase = 'playing';
-    g.claimVotes = null;
-    broadcast(room, { type: 'notice', text: '成牌申请被拒绝，游戏继续（已公开的手牌保持公开）' });
-    broadcastState(room);
-    return;
-  }
-
-  // 全部同意：本局按正常规则提前结束
-  broadcast(room, { type: 'notice', text: '所有玩家一致认同，庄家方成牌！本局提前结束' });
-  if (g.bid === 100) {
-    // 板百：成牌时 P 必然 < 5（否则已提前结束），即干推，庄家方获胜
-    const dealerTeamKey = TEAM_OF_SEAT[g.dealer];
-    const nonDealerTeamKey = OTHER_TEAM[dealerTeamKey];
-    if (g.p >= 5) {
-      endMatch(room, nonDealerTeamKey, '板百：非庄家得分≥5');
-    } else {
-      endMatch(room, dealerTeamKey, '板百：庄家成牌（干推）');
-    }
-    return;
-  }
-  settleRegularRound(room);
+  if (!g || g.phase !== 'claim') { sendError(ws, '当前不是成牌表决阶段'); return; }
+  if (g.claimVotes[ws.seat] !== null) { sendError(ws, '你已经表决过了'); return; }
+  performClaimVote(room, ws.seat, msg.agree === true);
 }
 
 /** 表情消息：校验文件存在后广播给所有玩家，并解析发送对象。 */
@@ -804,54 +818,313 @@ function handleEmoji(ws, room, msg) {
 }
 
 function handleMessage(ws, msg) {
-  const room = rooms.get(ws.roomCode);
   switch (msg.type) {
     case 'join':
       handleJoin(ws, msg);
       break;
-    case 'call':
+    case 'reconnect':
+      handleReconnect(ws, msg);
+      break;
+    case 'call': {
+      const room = rooms.get(ws.roomCode);
       if (room) handleCall(ws, room, msg);
       break;
-    case 'trump':
+    }
+    case 'trump': {
+      const room = rooms.get(ws.roomCode);
       if (room) handleTrump(ws, room, msg);
       break;
-    case 'pickup':
+    }
+    case 'pickup': {
+      const room = rooms.get(ws.roomCode);
       if (room) handlePickup(ws, room, msg);
       break;
-    case 'discard':
+    }
+    case 'discard': {
+      const room = rooms.get(ws.roomCode);
       if (room) handleDiscard(ws, room, msg);
       break;
-    case 'play':
+    }
+    case 'play': {
+      const room = rooms.get(ws.roomCode);
       if (room) handlePlay(ws, room, msg);
       break;
-    case 'claim':
+    }
+    case 'claim': {
+      const room = rooms.get(ws.roomCode);
       if (room) handleClaim(ws, room);
       break;
-    case 'claim_vote':
+    }
+    case 'claim_vote': {
+      const room = rooms.get(ws.roomCode);
       if (room) handleClaimVote(ws, room, msg);
       break;
-    case 'emoji':
+    }
+    case 'emoji': {
+      const room = rooms.get(ws.roomCode);
       if (room) handleEmoji(ws, room, msg);
       break;
+    }
+    case 'end_game': {
+      const room = rooms.get(ws.roomCode);
+      if (room) handleEndGame(ws, room);
+      break;
+    }
+    case 'match_choice': {
+      const room = rooms.get(ws.roomCode);
+      if (room) handleMatchChoice(ws, room, msg);
+      break;
+    }
     default:
       sendError(ws, '未知消息类型');
   }
+}
+
+function removeSeat(room, seat) {
+  const rec = room.players[seat];
+  if (rec) {
+    if (rec.autoTimer) clearTimeout(rec.autoTimer);
+    if (rec.kickTimer) clearTimeout(rec.kickTimer);
+  }
+  delete room.players[seat];
+  delete room.names[seat];
 }
 
 function handleClose(ws) {
   const room = rooms.get(ws.roomCode);
   if (!room) return;
   const seat = ws.seat;
-  if (!seat || room.players[seat] !== ws) return;
+  const rec = room.players[seat];
+  if (!seat || !rec || rec.ws !== ws) return; // 旧连接/已重连的旧 socket 忽略
   const name = room.names[seat] || seat;
-  room.players[seat] = null;
-  broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）离开房间` });
-  if (room.game) {
+
+  // 对局结束后的离开，或尚未开局：直接移除座位
+  if (!room.game || room.game.phase === 'game_over') {
+    removeSeat(room, seat);
+    if (room.game && room.game.phase === 'game_over') room.game = null;
+    broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）离开房间` });
+    broadcastRoom(room);
+    if (!SEATS.some((s) => room.players[s])) rooms.delete(room.code);
+    return;
+  }
+
+  // 对局中：标记离线、保留数据，等待重连；2 分钟未重连则踢出并结束对局
+  rec.ws = null;
+  rec.online = false;
+  rec.offlineAt = Date.now();
+  broadcast(room, { type: 'player_offline', playerName: name, seat });
+  broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已断开连接，等待重连…（2分钟内）` });
+  broadcastState(room);
+
+  rec.kickTimer = setTimeout(() => {
+    if (room.players[seat] !== rec || rec.online) return;
+    const leftName = room.names[seat] || seat;
+    removeSeat(room, seat);
     room.game = null;
-    broadcast(room, { type: 'notice', text: '对局中断。房间等待新玩家加入，满4人后自动重新开始' });
+    broadcast(room, { type: 'game_ended', reason: `${leftName} 离开游戏` });
+    broadcast(room, { type: 'notice', text: `${leftName} 已离开游戏，对局结束。房间等待新玩家加入` });
+    broadcastRoom(room);
+    if (!SEATS.some((s) => room.players[s])) rooms.delete(room.code);
+  }, KICK_DELAY);
+}
+
+/** 断线重连：按 playerId 找回座位，恢复状态快照。 */
+function handleReconnect(ws, msg) {
+  const pid = String(msg.playerId || '');
+  if (!pid) {
+    sendError(ws, '缺少玩家标识，无法恢复对局');
+    return;
+  }
+  for (const room of rooms.values()) {
+    for (const seat of SEATS) {
+      const rec = room.players[seat];
+      if (!rec || rec.playerId !== pid) continue;
+      // 重新绑定连接
+      rec.ws = ws;
+      rec.online = true;
+      rec.offlineAt = null;
+      if (rec.autoTimer) { clearTimeout(rec.autoTimer); rec.autoTimer = null; }
+      if (rec.kickTimer) { clearTimeout(rec.kickTimer); rec.kickTimer = null; }
+      ws.roomCode = room.code;
+      ws.seat = seat;
+      ws.playerId = pid;
+      const name = room.names[seat] || '玩家';
+      if (room.game) {
+        // 恢复完整状态：公共状态 + 自己的手牌
+        send(ws, { type: 'state_sync', seat, hand: room.game.hands[seat], public: publicState(room) });
+        broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已重连` });
+        broadcastState(room);
+      } else {
+        send(ws, { type: 'game_ended', reason: '对局已结束，请重新开始' });
+        send(ws, { type: 'state', public: publicState(room) });
+      }
+      return;
+    }
+  }
+  sendError(ws, '无法恢复对局，请刷新页面重新进入房间');
+}
+
+/** 有人离线等太久时，在线玩家可主动结束对局，回到等待状态并选择接续方式。 */
+function handleEndGame(ws, room) {
+  const g = room.game;
+  if (!g || g.phase === 'game_over' || g.phase === 'round_end') {
+    sendError(ws, '当前不能结束对局');
+    return;
+  }
+  const anyOffline = SEATS.some((s) => {
+    const r = room.players[s];
+    return r && !r.online;
+  });
+  if (!anyOffline) {
+    sendError(ws, '当前没有离线玩家，无需结束对局');
+    return;
+  }
+  // 立即移除离线玩家的座位，解放房间位置
+  for (const seat of SEATS) {
+    const r = room.players[seat];
+    if (r && !r.online) removeSeat(room, seat);
+  }
+  const scores = { ns: room.match.scores.ns, ew: room.match.scores.ew };
+  const wins = { ns: room.stats.matchWins.ns, ew: room.stats.matchWins.ew };
+  room.game = null;
+  room.nextStart = null;
+  broadcast(room, { type: 'game_ended', reason: '玩家主动结束对局' });
+  broadcast(room, { type: 'abort_choice', scores, roundWins: wins });
+  broadcast(room, { type: 'notice', text: '对局已结束，请选择重新开新大局或从当前分数接续' });
+  broadcastRoom(room);
+}
+
+/** 结束对局后由在场玩家选择：重新开大局（积分清零）或从当前分数接续。 */
+function handleMatchChoice(ws, room, msg) {
+  const mode = String(msg.mode || '');
+  if (mode !== 'new' && mode !== 'resume') {
+    sendError(ws, '无效的选择');
+    return;
+  }
+  if (room.game) {
+    sendError(ws, '当前对局尚未结束，不能选择接续方式');
+    return;
+  }
+  room.nextStart = mode;
+  if (mode === 'new') {
+    room.match = { scores: { ns: 0, ew: 0 }, gameCount: 0 };
+    broadcast(room, { type: 'notice', text: `${seatName(room, ws.seat)} 选择重新开始新的大局，积分已清零，等待玩家加入` });
+  } else {
+    broadcast(room, { type: 'notice', text: `${seatName(room, ws.seat)} 选择从当前分数接续，等待新玩家加入后继续` });
   }
   broadcastRoom(room);
-  if (!SEATS.some((s) => room.players[s])) rooms.delete(room.code);
+}
+
+/* ================= 断线自动托管 ================= */
+
+/** 该座位离线玩家当前是否需要系统代操作（轮到叫分/补牌/选主/弃牌/表决/出牌等）。 */
+function needsAction(room, seat) {
+  const g = room.game;
+  if (!g) return false;
+  switch (g.phase) {
+    case 'bidding':
+      return g.turn === seat;
+    case 'pickup_choose':
+      // 仅当庄家方全部离线时才自动补牌，避免和在线队友的操作冲突
+      return g.dealerTeam.includes(seat) && !g.dealerTeam.some((s) => {
+        const r = room.players[s];
+        return r && r.online;
+      });
+    case 'trump':
+      return g.turn === seat;
+    case 'discard':
+      return g.discarder === seat;
+    case 'claim':
+      return g.claimVotes ? g.claimVotes[seat] === null : false;
+    case 'playing':
+      return g.turn === seat;
+    default:
+      return false;
+  }
+}
+
+function scheduleTurnAutoAct(room) {
+  const g = room.game;
+  if (!g) return;
+  for (const seat of SEATS) {
+    const rec = room.players[seat];
+    if (!rec || rec.online) continue;
+    if (needsAction(room, seat)) {
+      if (!rec.autoTimer) {
+        rec.autoTimer = setTimeout(() => {
+          rec.autoTimer = null;
+          if (!room.players[seat] || rec.online || !needsAction(room, seat)) return;
+          autoAct(room, seat);
+        }, AUTO_ACT_DELAY);
+      }
+    } else if (rec.autoTimer) {
+      clearTimeout(rec.autoTimer);
+      rec.autoTimer = null;
+    }
+  }
+}
+
+function autoPlayCard(hand, ledSuit, trump) {
+  const legal = hand.filter((c) => canPlayCard(hand, c, ledSuit, trump));
+  const byRank = (a, b) => rankValue(cardRank(a)) - rankValue(cardRank(b));
+  const nontrump = legal.filter((c) => !isJoker(c) && cardSuit(c) !== trump).sort(byRank);
+  if (nontrump.length) return nontrump[0];
+  const trumps = legal.filter((c) => isJoker(c) || cardSuit(c) === trump).sort(byRank);
+  if (trumps.length) return trumps[0];
+  return legal[0];
+}
+
+function autoDiscardCards(hand) {
+  // 弃掉最小的6张（先非主牌后主牌，按点数）
+  const sorted = hand.slice().sort((a, b) => {
+    const ta = cardSuit(a) === 'JOKER' ? 1 : 0;
+    const tb = cardSuit(b) === 'JOKER' ? 1 : 0;
+    return (ta - tb) || (rankValue(cardRank(a)) - rankValue(cardRank(b)));
+  });
+  return sorted.slice(0, 6);
+}
+
+function autoTrumpSuit(hand) {
+  let best = 'S';
+  let bestN = -1;
+  for (const s of SUITS) {
+    const n = hand.filter((c) => cardSuit(c) === s).length;
+    if (n > bestN) { bestN = n; best = s; }
+  }
+  return best;
+}
+
+function autoAct(room, seat) {
+  const g = room.game;
+  if (!g) return;
+  const name = room.names[seat] || SEAT_LABELS[seat] + '家';
+  broadcast(room, { type: 'notice', text: `${name} 已离线，系统自动操作…` });
+  try {
+    switch (g.phase) {
+      case 'bidding':
+        performCall(room, seat, g.bid === 0 ? 80 : 0);
+        break;
+      case 'pickup_choose':
+        performPickup(room, seat, g.dealer);
+        break;
+      case 'trump':
+        performTrump(room, seat, autoTrumpSuit(g.hands[seat]));
+        break;
+      case 'discard':
+        performDiscard(room, seat, autoDiscardCards(g.hands[seat]));
+        break;
+      case 'claim':
+        performClaimVote(room, seat, true);
+        break;
+      case 'playing':
+        performPlay(room, seat, autoPlayCard(g.hands[seat], g.ledSuit, g.trump));
+        break;
+      default:
+        break;
+    }
+  } catch (e) {
+    console.error('自动操作失败:', e);
+  }
 }
 
 /* ================= HTTP + WebSocket 服务器 ================= */

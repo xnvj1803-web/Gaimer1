@@ -357,6 +357,35 @@
     position: fixed; inset: 0; pointer-events: none; z-index: 350; overflow: hidden;
   }
 
+  /* ---------- 连接状态指示 / 重连遮罩 ---------- */
+  #connIndicator {
+    position: fixed; top: 10px; right: 10px; z-index: 500;
+    background: rgba(15,25,38,.85); color: #fff; font-size: 12px;
+    padding: 4px 10px; border-radius: 14px;
+    pointer-events: none;
+  }
+  #connIndicator.reconnecting { color: #ffd54f; }
+  #connIndicator.offline { color: #ff8a80; }
+  #reconnectOverlay {
+    position: fixed; inset: 0; z-index: 450;
+    background: rgba(8,18,30,.72); backdrop-filter: blur(3px);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 18px;
+  }
+  #abortChoicePanel {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(92vw, 430px); z-index: 460;
+    background: rgba(24,36,52,.94); backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,.15); border-radius: 16px;
+    padding: 18px 20px; color: #fff; text-align: center;
+    box-shadow: 0 16px 50px rgba(0,0,0,.5);
+  }
+  #abortChoicePanel .abort-title { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+  #abortChoicePanel .abort-info { font-size: 14px; color: #ffd54f; margin-bottom: 14px; line-height: 1.8; }
+  #abortChoicePanel .abort-btns { display: flex; flex-direction: column; gap: 10px; }
+  #abortChoicePanel .abort-btns button { min-height: 46px; font-size: 15px; }
+  #abortChoicePanel .hint { color: #90a4ae; font-size: 12px; margin-top: 12px; line-height: 1.6; }
+
   /* ================= 手机端适配（仅影响 ≤768px，电脑端保持不变） ================= */
   @media (max-width: 768px) {
     #gameScreen {
@@ -433,6 +462,8 @@
 
     /* 表情面板/气泡：手机端尺寸 */
     #emojiBtn { padding: 5px 14px; font-size: 13px; }
+    #connIndicator { top: 6px; right: 6px; font-size: 11px; padding: 3px 8px; }
+    #reconnectOverlay { font-size: 15px; }
     #emojiPanel { width: min(94vw, 420px); padding: 12px; }
     #emojiGrid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 6px; }
     .emoji-thumb { width: 52px; height: 52px; }
@@ -524,6 +555,18 @@
 
 <div id="emojiBubbleLayer"></div>
 
+<div id="connIndicator" class="hidden">🟢 已连接</div>
+<div id="reconnectOverlay" class="hidden">正在重连…</div>
+<div id="abortChoicePanel" class="hidden">
+  <div class="abort-title">对局已结束</div>
+  <div class="abort-info" id="abortInfo"></div>
+  <div class="abort-btns">
+    <button class="gold" onclick="sendMatchChoice('new')">重新开一个大局（积分清零）</button>
+    <button onclick="sendMatchChoice('resume')">从之前的分数接替</button>
+  </div>
+  <div class="hint">离线玩家已离开，房间等待新玩家加入后自动开始</div>
+</div>
+
 <div id="toastWrap"></div>
 
 <script>
@@ -553,6 +596,8 @@ let myRoom = '';
 let myHand = [];
 let publicState = null;
 let selectedDiscard = new Set();
+let playerId = '';
+let reconnectAttempts = 0;
 
 function $(id) { return document.getElementById(id); }
 function send(obj) {
@@ -619,6 +664,31 @@ function teamNameOfSeat(seat) {
 }
 
 /* ================= 连接 ================= */
+function wsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return proto + '://' + location.host + '/ws';
+}
+
+function bindSocket(ws, opts) {
+  ws.onmessage = (ev) => onMessage(ev.data);
+  ws.onerror = () => {};
+  ws.onclose = () => {
+    if (socket !== ws) return;
+    socket = null;
+    if (opts && opts.reconnectMode) {
+      setTimeout(tryReconnect, 3000);
+      return;
+    }
+    if (mySeat) {
+      startReconnect();
+    } else {
+      $('connectPanel').classList.remove('hidden');
+      $('gameScreen').classList.add('hidden');
+      setConnStatus('连接已断开，请重新进入房间');
+    }
+  };
+}
+
 function connectRoom() {
   const name = $('nameInput').value.trim() || ('玩家' + Math.floor(Math.random() * 900 + 100));
   let room = $('roomInput').value.trim();
@@ -630,23 +700,50 @@ function connectRoom() {
     setConnStatus('房间号必须是4位数字');
     return;
   }
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  socket = new WebSocket(proto + '://' + location.host + '/ws');
-  socket.onopen = () => send({ type: 'join', room, name });
-  socket.onmessage = (ev) => onMessage(ev.data);
-  socket.onerror = () => setConnStatus('连接服务器失败，请确认服务端已启动');
-  socket.onclose = () => {
-    if (mySeat) {
-      showToast('连接已断开，请刷新页面重新进入房间', true);
-      $('connectPanel').classList.remove('hidden');
-      $('gameScreen').classList.add('hidden');
-      mySeat = null;
-      myHand = [];
-      publicState = null;
-      setConnStatus('连接已断开，请重新进入房间');
-    }
-  };
+  const ws = new WebSocket(wsUrl());
+  socket = ws;
+  bindSocket(ws);
+  ws.onopen = () => send({ type: 'join', room, name });
   setConnStatus('连接中…');
+}
+
+function stopReconnect() {
+  reconnectAttempts = 0;
+  $('reconnectOverlay').classList.add('hidden');
+  $('connIndicator').classList.remove('reconnecting');
+  $('connIndicator').textContent = '🔴 已断开';
+  $('connIndicator').classList.add('offline');
+}
+
+function startReconnect() {
+  reconnectAttempts = 0;
+  $('connIndicator').classList.remove('hidden');
+  $('connIndicator').textContent = '🟡 重连中…';
+  $('connIndicator').classList.add('reconnecting');
+  $('connIndicator').classList.remove('offline');
+  $('reconnectOverlay').classList.remove('hidden');
+  tryReconnect();
+}
+
+function tryReconnect() {
+  if (reconnectAttempts >= 10) {
+    stopReconnect();
+    showToast('连接失败，请刷新页面重试', true);
+    $('connectPanel').classList.remove('hidden');
+    $('gameScreen').classList.add('hidden');
+    mySeat = null;
+    myHand = [];
+    publicState = null;
+    return;
+  }
+  reconnectAttempts++;
+  $('reconnectOverlay').textContent = '正在重连…（' + reconnectAttempts + '/10）';
+  const ws = new WebSocket(wsUrl());
+  bindSocket(ws, { reconnectMode: true });
+  ws.onopen = () => {
+    socket = ws;
+    send({ type: 'reconnect', playerId });
+  };
 }
 
 function setConnStatus(text) {
@@ -663,6 +760,23 @@ function onMessage(raw) {
       myName = msg.name;
       myRoom = msg.room;
       myHand = msg.hand || [];
+      playerId = msg.playerId || '';
+      if (playerId) { try { localStorage.setItem('gamai_player_id', playerId); } catch (e) {} }
+      $('reconnectOverlay').classList.add('hidden');
+      $('connIndicator').classList.remove('hidden', 'reconnecting', 'offline');
+      $('connIndicator').textContent = '🟢 已连接';
+      $('connectPanel').classList.add('hidden');
+      $('gameScreen').classList.remove('hidden');
+      render();
+      break;
+    case 'state_sync':
+      // 断线重连后恢复完整状态
+      mySeat = msg.seat;
+      myHand = msg.hand || [];
+      publicState = msg.public;
+      $('reconnectOverlay').classList.add('hidden');
+      $('connIndicator').classList.remove('reconnecting', 'offline');
+      $('connIndicator').textContent = '🟢 已连接';
       $('connectPanel').classList.add('hidden');
       $('gameScreen').classList.remove('hidden');
       render();
@@ -694,7 +808,23 @@ function onMessage(raw) {
       showToast(msg.text);
       break;
     case 'error':
+      if (msg.text && msg.text.indexOf('无法恢复对局') !== -1) {
+        stopReconnect();
+        $('connectPanel').classList.remove('hidden');
+        $('gameScreen').classList.add('hidden');
+        mySeat = null;
+      }
       showToast('⚠ ' + msg.text, true);
+      break;
+    case 'player_offline':
+      showToast(msg.playerName + ' 已断开连接，等待重连…');
+      break;
+    case 'game_ended':
+      $('reconnectOverlay').classList.add('hidden');
+      showToast('对局结束：' + msg.reason, true);
+      break;
+    case 'abort_choice':
+      showAbortChoice(msg);
       break;
     case 'room':
       if (publicState) publicState.players = msg.players;
@@ -727,6 +857,7 @@ function describePhase(st) {
 function render() {
   const st = publicState;
   if (!st) return;
+  if (st.phase !== 'waiting') $('abortChoicePanel').classList.add('hidden');
   renderInfoBar(st);
   renderSeats(st);
   renderHands(st);
@@ -752,6 +883,11 @@ function renderInfoBar(st) {
     parts.push('<span><span class="label">累计</span><b>南北 ' + s.ns + ' : ' + s.ew + ' 东西</b></span>');
   }
   parts.push('<span><span class="label">大局胜利</span><b>南北 ' + mw.ns + ' : ' + mw.ew + ' 东西</b></span>');
+  // 有人离线时提供“结束对局”按钮，避免等满2分钟
+  const anyOffline = st.players && SEATS.some((s) => st.players[s] && !st.players[s].connected);
+  if (anyOffline && ['waiting', 'game_over', 'round_end'].indexOf(st.phase) === -1) {
+    parts.push('<button class="warn" style="padding:4px 12px;font-size:12px" onclick="sendEndGame()">结束对局</button>');
+  }
   $('infoBar').innerHTML = parts.join('');
 }
 
@@ -1081,6 +1217,18 @@ function sendClaim() {
 }
 function sendClaimVote(agree) {
   send({ type: 'claim_vote', agree });
+}
+function sendEndGame() {
+  send({ type: 'end_game' });
+}
+function sendMatchChoice(mode) {
+  send({ type: 'match_choice', mode });
+  $('abortChoicePanel').classList.add('hidden');
+}
+function showAbortChoice(msg) {
+  const s = msg.scores || { ns: 0, ew: 0 };
+  $('abortInfo').textContent = '当前累计分：南北 ' + s.ns + ' : ' + s.ew + ' 东西';
+  $('abortChoicePanel').classList.remove('hidden');
 }
 let emojiList = [];
 let selectedEmoji = null;
