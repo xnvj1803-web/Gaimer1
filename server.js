@@ -776,7 +776,12 @@ function handleClaimVote(ws, room, msg) {
 function handleEmoji(ws, room, msg) {
   const emoji = String(msg.emoji || '');
   const target = String(msg.target || 'all');
-  if (!/^[A-Za-z0-9_\-.一-鿿]+$/.test(emoji) || !IMAGE_EXTS.has(path.extname(emoji).toLowerCase())) {
+  // 文件名校验：禁止路径分隔符与 ..，必须是支持的图片格式；其余字符（中文、空格等）都允许
+  if (
+    emoji.length < 1 || emoji.length > 100 ||
+    emoji.includes('/') || emoji.includes('\\') || emoji.includes('..') ||
+    !IMAGE_EXTS.has(path.extname(emoji).toLowerCase())
+  ) {
     sendError(ws, '表情文件名无效');
     return;
   }
