@@ -76,7 +76,7 @@
   #gameScreen {
     position: fixed; inset: 0;
     display: grid;
-    grid-template-rows: 48px 128px minmax(0, 1fr) 162px;
+    grid-template-rows: 48px 158px minmax(0, 1fr) 196px;
     grid-template-columns: 96px minmax(0, 1fr) 96px;
     gap: 6px;
     padding: 8px;
@@ -148,7 +148,7 @@
 
   /* ---------- 牌 ---------- */
   .card {
-    width: 60px; height: 86px;
+    width: 81px; height: 114px;
     background: linear-gradient(145deg, #ffffff, #e8ecf2);
     border-radius: 7px;
     border: 1px solid #b9c3cf;
@@ -158,18 +158,18 @@
     user-select: none;
     font-family: Georgia, "Times New Roman", serif;
   }
-  .card .rank { position: absolute; top: 5px; left: 8px; font-size: 17px; font-weight: bold; line-height: 1; }
-  .card .suit { position: absolute; bottom: 4px; right: 7px; font-size: 19px; line-height: 1; }
+  .card .rank { position: absolute; top: 7px; left: 10px; font-size: 24px; font-weight: bold; line-height: 1; }
+  .card .suit { position: absolute; bottom: 6px; right: 9px; font-size: 27px; line-height: 1; }
   .card.red { color: #d32f2f; }
   .card.black { color: #212121; }
   .card.joker { background: linear-gradient(145deg, #fffdf5, #ffe9c4); }
   .card.joker .joker-label {
     position: absolute; top: 9px; left: 0; right: 0;
-    text-align: center; font-size: 13px; font-weight: bold; color: #212121;
+    text-align: center; font-size: 18px; font-weight: bold; color: #212121;
   }
   .card.joker .joker-star {
     position: absolute; bottom: 9px; left: 0; right: 0;
-    text-align: center; font-size: 22px;
+    text-align: center; font-size: 30px;
   }
   .card.joker.joker-big .joker-star { color: #e53935; }
   .card.joker.joker-small .joker-star { color: #37474f; }
@@ -198,7 +198,7 @@
   .hand.horizontal .card { margin-left: 6px; }
   .hand.horizontal .card:first-child { margin-left: 0; }
   .hand.vertical { flex-direction: column; align-items: center; }
-  .hand.vertical .card { margin-top: -58px; }
+  .hand.vertical .card { width: 56px; height: 80px; margin-top: -76px; }
   .hand.vertical .card:first-child { margin-top: 0; }
 
   .hand .card.selectable { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
@@ -220,7 +220,6 @@
   .trick-slot.bottom { bottom: 16px; left: 50%; transform: translateX(-50%); }
   .trick-slot.left { left: 12px; top: 50%; transform: translateY(-50%); }
   .trick-slot.right { right: 12px; top: 50%; transform: translateY(-50%); }
-  #centerArea.has-public .trick-slot.bottom { bottom: 112px; }
   .trick-slot.winner .card { outline: 3px solid #ffd54f; border-radius: 7px; }
   .trick-slot .card { transform: none; }
 
@@ -241,6 +240,12 @@
     position: absolute; right: 8px; bottom: 8px;
     display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
     z-index: 5;
+  }
+  /* 成牌/板百准备阶段（补牌、弃牌、选主、表决）：底牌/弃牌保持在原位置（顶部中央） */
+  #centerArea.public-old #publicCards {
+    right: auto; bottom: auto; left: 50%; top: 8px;
+    transform: translateX(-50%);
+    align-items: center;
   }
   #publicCards .row {
     display: flex; align-items: center; gap: 6px;
@@ -435,13 +440,14 @@
     .hand.horizontal .card:first-child { margin-left: 0; }
 
     /* 左右两家：紧凑的竖向牌背示意 */
-    .hand.vertical .card { margin-top: -50px; }
+    .hand.vertical .card { width: 40px; height: 58px; margin-top: -50px; }
 
     /* 中央牌桌 */
     .trick-slot.top { top: 8px; }
     .trick-slot.bottom { bottom: 8px; }
     .trick-slot.left { left: 6px; }
     .trick-slot.right { right: 6px; }
+    #centerArea.has-public .trick-slot.bottom { bottom: 88px; }
     #centerArea.has-public .trick-slot.right { top: 28%; }
     #centerInfo { font-size: 12px; padding: 8px 12px; min-width: 0; line-height: 1.6; border-radius: 10px; }
     #centerInfo .big { font-size: 15px; }
@@ -449,6 +455,7 @@
 
     /* 公开区（底牌/弃牌/公开手牌） */
     #publicCards { right: 4px; bottom: 4px; gap: 4px; max-width: 96%; }
+    #centerArea.public-old #publicCards { right: auto; bottom: auto; left: 50%; top: 4px; transform: translateX(-50%); align-items: center; }
     #publicCards .row { font-size: 11px; padding: 3px 7px; gap: 4px; max-width: 100%; }
     #publicCards .row .cards .card { width: 34px; height: 48px; margin-left: 3px; }
     #publicCards .row .cards .card:first-child { margin-left: 0; }
@@ -494,7 +501,7 @@
     @media (orientation: landscape) {
       .card { width: 34px; height: 50px; }
       .hand.horizontal { min-height: 58px; }
-      .hand.vertical .card { margin-top: -44px; }
+      .hand.vertical .card { width: 34px; height: 50px; margin-top: -44px; }
       #centerInfo { font-size: 11px; padding: 6px 10px; }
       #infoBar { font-size: 11px; padding: 4px 6px; }
       #publicCards .row .cards .card { width: 28px; height: 40px; }
@@ -1206,6 +1213,8 @@ function renderTrick(st) {
     pub.appendChild(row);
   }
   $('centerArea').classList.toggle('has-public', pub.children.length > 0);
+  // 成牌/板百准备阶段（补牌、弃牌、选主、表决）：公开牌区保持在原位置（顶部中央）；出牌阶段移到右下角
+  $('centerArea').classList.toggle('public-old', ['pickup_choose', 'discard', 'trump', 'claim'].indexOf(st.phase) !== -1);
 }
 
 function renderDialog(st) {
