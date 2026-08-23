@@ -41,6 +41,13 @@
     font-size: 16px; text-align: center; outline: none;
   }
   #connectPanel input:focus { border-color: #2e7fd6; box-shadow: 0 0 0 3px rgba(46,127,214,.15); }
+  #connectPanel .auth-btns { display: flex; gap: 8px; margin-bottom: 8px; }
+  #connectPanel .auth-btns button {
+    flex: 1; padding: 9px 0; font-size: 13px; border-radius: 9px;
+    background: #546e7a; color: #fff; border: none; cursor: pointer;
+  }
+  #connectPanel .auth-btns button:hover { filter: brightness(1.12); }
+  #connectPanel #authStatus { font-size: 12px; color: #2e7d32; min-height: 16px; margin: -2px 0 10px; }
   #connectPanel .btns { display: flex; gap: 12px; margin-top: 8px; }
   #connectPanel button {
     flex: 1; padding: 12px 0; border: none; border-radius: 10px;
@@ -56,7 +63,7 @@
   #gameScreen {
     position: fixed; inset: 0;
     display: grid;
-    grid-template-rows: 48px 118px minmax(0, 1fr) 158px;
+    grid-template-rows: 48px 128px minmax(0, 1fr) 162px;
     grid-template-columns: 96px minmax(0, 1fr) 96px;
     gap: 6px;
     padding: 8px;
@@ -128,7 +135,7 @@
 
   /* ---------- 牌 ---------- */
   .card {
-    width: 54px; height: 76px;
+    width: 60px; height: 86px;
     background: linear-gradient(145deg, #ffffff, #e8ecf2);
     border-radius: 7px;
     border: 1px solid #b9c3cf;
@@ -138,18 +145,18 @@
     user-select: none;
     font-family: Georgia, "Times New Roman", serif;
   }
-  .card .rank { position: absolute; top: 5px; left: 7px; font-size: 15px; font-weight: bold; line-height: 1; }
-  .card .suit { position: absolute; bottom: 4px; right: 6px; font-size: 17px; line-height: 1; }
+  .card .rank { position: absolute; top: 5px; left: 8px; font-size: 17px; font-weight: bold; line-height: 1; }
+  .card .suit { position: absolute; bottom: 4px; right: 7px; font-size: 19px; line-height: 1; }
   .card.red { color: #d32f2f; }
   .card.black { color: #212121; }
   .card.joker { background: linear-gradient(145deg, #fffdf5, #ffe9c4); }
   .card.joker .joker-label {
     position: absolute; top: 9px; left: 0; right: 0;
-    text-align: center; font-size: 12px; font-weight: bold; color: #212121;
+    text-align: center; font-size: 13px; font-weight: bold; color: #212121;
   }
   .card.joker .joker-star {
     position: absolute; bottom: 9px; left: 0; right: 0;
-    text-align: center; font-size: 20px;
+    text-align: center; font-size: 22px;
   }
   .card.joker.joker-big .joker-star { color: #e53935; }
   .card.joker.joker-small .joker-star { color: #37474f; }
@@ -178,7 +185,7 @@
   .hand.horizontal .card { margin-left: 6px; }
   .hand.horizontal .card:first-child { margin-left: 0; }
   .hand.vertical { flex-direction: column; align-items: center; }
-  .hand.vertical .card { margin-top: -46px; }
+  .hand.vertical .card { margin-top: -58px; }
   .hand.vertical .card:first-child { margin-top: 0; }
 
   .hand .card.selectable { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
@@ -200,7 +207,7 @@
   .trick-slot.bottom { bottom: 16px; left: 50%; transform: translateX(-50%); }
   .trick-slot.left { left: 12px; top: 50%; transform: translateY(-50%); }
   .trick-slot.right { right: 12px; top: 50%; transform: translateY(-50%); }
-  #centerArea.has-public .trick-slot.top { top: 96px; }
+  #centerArea.has-public .trick-slot.bottom { bottom: 112px; }
   .trick-slot.winner .card { outline: 3px solid #ffd54f; border-radius: 7px; }
   .trick-slot .card { transform: none; }
 
@@ -218,8 +225,8 @@
   #centerInfo button { pointer-events: auto; margin-top: 8px; }
 
   #publicCards {
-    position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
-    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    position: absolute; right: 8px; bottom: 8px;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
     z-index: 5;
   }
   #publicCards .row {
@@ -422,14 +429,13 @@
     .trick-slot.bottom { bottom: 8px; }
     .trick-slot.left { left: 6px; }
     .trick-slot.right { right: 6px; }
-    #centerArea.has-public .trick-slot.top { top: 74px; }
-
+    #centerArea.has-public .trick-slot.right { top: 28%; }
     #centerInfo { font-size: 12px; padding: 8px 12px; min-width: 0; line-height: 1.6; border-radius: 10px; }
     #centerInfo .big { font-size: 15px; }
     #centerInfo button { min-height: 44px; font-size: 13px; }
 
     /* 公开区（底牌/弃牌/公开手牌） */
-    #publicCards { top: 4px; gap: 4px; max-width: 96%; }
+    #publicCards { right: 4px; bottom: 4px; gap: 4px; max-width: 96%; }
     #publicCards .row { font-size: 11px; padding: 3px 7px; gap: 4px; max-width: 100%; }
     #publicCards .row .cards .card { width: 34px; height: 48px; margin-left: 3px; }
     #publicCards .row .cards .card:first-child { margin-left: 0; }
@@ -491,6 +497,14 @@
     <h1>盖帽 / 百分</h1>
     <div class="sub">四人联机 · 对家一队 · 单张出牌 · 翻底板百</div>
     <input id="nameInput" placeholder="你的昵称" maxlength="12" autocomplete="off">
+    <input id="accountInput" placeholder="账号（可选，登录后断线可跨设备恢复）" maxlength="20" autocomplete="username">
+    <input id="passwordInput" type="password" placeholder="密码（至少6位）" maxlength="64" autocomplete="current-password">
+    <div class="auth-btns">
+      <button id="btnLogin" type="button">登录</button>
+      <button id="btnRegister" type="button">注册</button>
+      <button id="btnLogout" type="button" class="hidden">退出登录</button>
+    </div>
+    <div id="authStatus"></div>
     <input id="roomInput" placeholder="房间号（4位数字）" maxlength="4" autocomplete="off">
     <div class="btns">
       <button id="btnCreate">创建房间</button>
@@ -598,6 +612,8 @@ let publicState = null;
 let selectedDiscard = new Set();
 let playerId = '';
 let reconnectAttempts = 0;
+let authToken = '';
+let authAccount = '';
 
 function $(id) { return document.getElementById(id); }
 function send(obj) {
@@ -669,6 +685,103 @@ function wsUrl() {
   return proto + '://' + location.host + '/ws';
 }
 
+/* ---------- 账号登录 / 注册 ---------- */
+async function api(path, body) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (e) {
+    return { ok: false, status: 0, data: { error: '网络错误，请稍后重试' } };
+  }
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  return { ok: res.ok, status: res.status, data };
+}
+
+function saveAuth(data) {
+  authToken = data.token;
+  authAccount = data.username;
+  try {
+    localStorage.setItem('gamai_token', authToken);
+    localStorage.setItem('gamai_account', authAccount);
+  } catch (e) {}
+  if (data.nickname) $('nameInput').value = data.nickname;
+  $('accountInput').value = authAccount;
+  renderAuthState();
+}
+
+function logout() {
+  authToken = '';
+  authAccount = '';
+  try {
+    localStorage.removeItem('gamai_token');
+    localStorage.removeItem('gamai_account');
+  } catch (e) {}
+  renderAuthState();
+  setConnStatus('已退出登录');
+}
+
+function renderAuthState() {
+  const logged = !!authAccount;
+  $('btnLogout').classList.toggle('hidden', !logged);
+  $('btnLogin').disabled = logged;
+  $('btnRegister').disabled = logged;
+  $('authStatus').textContent = logged ? '已登录：' + authAccount + '（断线可恢复）' : '';
+}
+
+function loadAuth() {
+  try {
+    authToken = localStorage.getItem('gamai_token') || '';
+    authAccount = localStorage.getItem('gamai_account') || '';
+  } catch (e) {}
+  if (authAccount) $('accountInput').value = authAccount;
+  renderAuthState();
+  if (authToken) {
+    api('/api/me?token=' + encodeURIComponent(authToken)).then((r) => {
+      if (r.ok) {
+        authAccount = r.data.username;
+        if (r.data.nickname) $('nameInput').value = r.data.nickname;
+        renderAuthState();
+      } else {
+        logout();
+      }
+    });
+  }
+}
+
+async function doLogin() {
+  const username = $('accountInput').value.trim();
+  const password = $('passwordInput').value;
+  if (!username || !password) { setConnStatus('请输入账号和密码'); return; }
+  setConnStatus('登录中…');
+  const r = await api('/api/login', { username, password });
+  if (r.ok) {
+    saveAuth(r.data);
+    setConnStatus('登录成功：' + r.data.nickname);
+  } else {
+    setConnStatus((r.data && r.data.error) || '登录失败');
+  }
+}
+
+async function doRegister() {
+  const username = $('accountInput').value.trim();
+  const password = $('passwordInput').value;
+  const nickname = $('nameInput').value.trim() || '玩家';
+  if (!username || !password) { setConnStatus('请输入账号和密码'); return; }
+  setConnStatus('注册中…');
+  const r = await api('/api/register', { username, password, nickname });
+  if (r.ok) {
+    saveAuth(r.data);
+    setConnStatus('注册成功，已自动登录：' + r.data.nickname);
+  } else {
+    setConnStatus((r.data && r.data.error) || '注册失败');
+  }
+}
+
 function bindSocket(ws, opts) {
   ws.onmessage = (ev) => onMessage(ev.data);
   ws.onerror = () => {};
@@ -679,6 +792,13 @@ function bindSocket(ws, opts) {
       setTimeout(tryReconnect, 3000);
       return;
     }
+    if (opts && opts.resumeMode) {
+      // 页面加载时的自动恢复失败：回到连接面板，不做无限重试
+      $('reconnectOverlay').classList.add('hidden');
+      $('connIndicator').classList.remove('reconnecting');
+      setConnStatus('无法自动恢复对局，请重新进入房间');
+      return;
+    }
     if (mySeat) {
       startReconnect();
     } else {
@@ -686,6 +806,39 @@ function bindSocket(ws, opts) {
       $('gameScreen').classList.add('hidden');
       setConnStatus('连接已断开，请重新进入房间');
     }
+  };
+}
+
+/** 页面加载时：若浏览器里保存过 playerId，尝试直接恢复原对局。 */
+function attemptResume() {
+  let pid = '';
+  try { pid = localStorage.getItem('gamai_player_id') || ''; } catch (e) {}
+  if (!pid) return;
+  playerId = pid;
+  try {
+    const savedRoom = localStorage.getItem('gamai_room') || '';
+    if (savedRoom) $('roomInput').value = savedRoom;
+  } catch (e) {}
+  if (authToken) {
+    api('/api/me?token=' + encodeURIComponent(authToken)).then((r) => {
+      if (r.ok) {
+        authAccount = r.data.username;
+        if (r.data.nickname) $('nameInput').value = r.data.nickname;
+        renderAuthState();
+      } else {
+        logout();
+      }
+    });
+  }
+  $('connIndicator').classList.remove('hidden');
+  $('connIndicator').textContent = '🟡 重连中…';
+  $('connIndicator').classList.add('reconnecting');
+  $('reconnectOverlay').classList.remove('hidden');
+  const ws = new WebSocket(wsUrl());
+  bindSocket(ws, { resumeMode: true });
+  ws.onopen = () => {
+    socket = ws;
+    send({ type: 'reconnect', playerId, token: authToken });
   };
 }
 
@@ -703,7 +856,7 @@ function connectRoom() {
   const ws = new WebSocket(wsUrl());
   socket = ws;
   bindSocket(ws);
-  ws.onopen = () => send({ type: 'join', room, name });
+  ws.onopen = () => send({ type: 'join', room, name, token: authToken });
   setConnStatus('连接中…');
 }
 
@@ -742,7 +895,7 @@ function tryReconnect() {
   bindSocket(ws, { reconnectMode: true });
   ws.onopen = () => {
     socket = ws;
-    send({ type: 'reconnect', playerId });
+    send({ type: 'reconnect', playerId, token: authToken });
   };
 }
 
@@ -762,6 +915,7 @@ function onMessage(raw) {
       myHand = msg.hand || [];
       playerId = msg.playerId || '';
       if (playerId) { try { localStorage.setItem('gamai_player_id', playerId); } catch (e) {} }
+      try { localStorage.setItem('gamai_room', msg.room); } catch (e) {}
       $('reconnectOverlay').classList.add('hidden');
       $('connIndicator').classList.remove('hidden', 'reconnecting', 'offline');
       $('connIndicator').textContent = '🟢 已连接';
@@ -995,9 +1149,8 @@ function renderTrick(st) {
   // 底牌 / 弃牌公开区
   const pub = $('publicCards');
   pub.innerHTML = '';
-  // 板百亮底后一直展示，直到庄家（第一轮先手）打出第一张牌才消失
-  const showPublic = st.bottomRevealed &&
-    (st.phase !== 'playing' || (st.round === 1 && st.trickOrder && st.trickOrder.length === 0));
+  // 板百：底牌与庄家弃牌始终显示（固定在牌桌右下角）
+  const showPublic = !!st.bottomRevealed;
   if (showPublic && st.bottom) {
     const row = document.createElement('div');
     row.className = 'row';
@@ -1360,12 +1513,17 @@ function showToast(text, isError) {
 /* ================= 初始化 ================= */
 $('btnCreate').addEventListener('click', connectRoom);
 $('btnJoin').addEventListener('click', connectRoom);
+$('btnLogin').addEventListener('click', doLogin);
+$('btnRegister').addEventListener('click', doRegister);
+$('btnLogout').addEventListener('click', logout);
 $('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') connectRoom(); });
 $('roomInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') connectRoom(); });
 $('emojiBtn').addEventListener('click', openEmojiPanel);
 $('emojiPanel').addEventListener('click', (e) => {
   if (e.target === $('emojiPanel')) closeEmojiPanel();
 });
+loadAuth();
+attemptResume();
 </script>
 </body>
 </html>

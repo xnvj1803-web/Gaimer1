@@ -28,6 +28,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT, 10) || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -54,6 +55,98 @@ const SUIT_ORDER = { H: 3, S: 2, D: 1, C: 0 };
 const START_ORDER = ['south', 'east', 'north', 'west'];
 
 const rooms = new Map(); // roomCode -> room
+
+/* ================= 账号系统 ================= */
+/* 配置 DATABASE_URL（PostgreSQL）时账号持久化存储；否则退化为内存存储（服务重启后失效）。 */
+
+function createMemoryUsersStore() {
+  const users = new Map(); // username -> user
+  return {
+    async init() {},
+    async findUserByUsername(username) { return users.get(username) || null; },
+    async findUserByToken(token) {
+      if (!token) return null;
+      for (const u of users.values()) if (u.token === token) return u;
+      return null;
+    },
+    async createUser({ username, passwordHash, nickname }) {
+      const user = { username, passwordHash, nickname, token: null, createdAt: new Date().toISOString(), lastLogin: null, totalGames: 0, wins: 0 };
+      users.set(username, user);
+      return user;
+    },
+    async setToken(username, token) { const u = users.get(username); if (u) u.token = token; },
+    async updateLastLogin(username) { const u = users.get(username); if (u) u.lastLogin = new Date().toISOString(); },
+    async recordGame(username, won) {
+      const u = users.get(username);
+      if (u) { u.totalGames += 1; if (won) u.wins += 1; }
+    }
+  };
+}
+
+function createPgUsersStore() {
+  const { Pool } = require('pg');
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false }
+  });
+  const q = (text, params) => pool.query(text, params);
+  const toUser = (row) => ({
+    username: row.username,
+    passwordHash: row.password_hash,
+    nickname: row.nickname,
+    token: row.token,
+    createdAt: row.created_at,
+    lastLogin: row.last_login,
+    totalGames: row.total_games,
+    wins: row.wins
+  });
+  return {
+    async init() {
+      await q(`CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        nickname VARCHAR(50) NOT NULL,
+        token VARCHAR(64),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP,
+        total_games INT DEFAULT 0,
+        wins INT DEFAULT 0
+      )`);
+    },
+    async findUserByUsername(username) {
+      const r = await q('SELECT * FROM users WHERE username = $1', [username]);
+      return r.rows[0] ? toUser(r.rows[0]) : null;
+    },
+    async findUserByToken(token) {
+      if (!token) return null;
+      const r = await q('SELECT * FROM users WHERE token = $1', [token]);
+      return r.rows[0] ? toUser(r.rows[0]) : null;
+    },
+    async createUser({ username, passwordHash, nickname }) {
+      const r = await q('INSERT INTO users (username, password_hash, nickname) VALUES ($1,$2,$3) RETURNING *', [username, passwordHash, nickname]);
+      return toUser(r.rows[0]);
+    },
+    async setToken(username, token) {
+      await q('UPDATE users SET token = $1 WHERE username = $2', [token, username]);
+    },
+    async updateLastLogin(username) {
+      await q('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = $1', [username]);
+    },
+    async recordGame(username, won) {
+      await q('UPDATE users SET total_games = total_games + 1, wins = wins + $1 WHERE username = $2', [won ? 1 : 0, username]);
+    }
+  };
+}
+
+const usersStore = process.env.DATABASE_URL ? createPgUsersStore() : createMemoryUsersStore();
+if (!process.env.DATABASE_URL) {
+  console.log('未配置 DATABASE_URL，账号保存在内存中（服务重启后失效）。需要持久化请配置 PostgreSQL。');
+}
+
+function genToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
 
 /* ================= 纯逻辑工具 ================= */
 
@@ -355,7 +448,7 @@ function startNewGame(room) {
 
 function assignSeat(room, ws, name, seat) {
   const playerId = genPlayerId();
-  room.players[seat] = { ws, playerId, name, online: true, offlineAt: null, autoTimer: null, kickTimer: null };
+  room.players[seat] = { ws, playerId, name, account: ws.account || null, online: true, offlineAt: null, autoTimer: null, kickTimer: null };
   room.names[seat] = name;
   ws.playerId = playerId;
   ws.roomCode = room.code;
@@ -405,6 +498,13 @@ function endMatch(room, winnerTeam, reason) {
   const g = room.game;
   // 大局（整局）胜利计数：跨大局累计，不随新大局清零
   room.stats.matchWins[winnerTeam] += 1;
+  // 账号战绩：有账号的玩家记录总局数与胜局数
+  for (const seat of SEATS) {
+    const rec = room.players[seat];
+    if (rec && rec.account) {
+      usersStore.recordGame(rec.account, TEAM_OF_SEAT[seat] === winnerTeam).catch(() => {});
+    }
+  }
   g.phase = 'game_over';
   g.over = {
     winnerTeam,
@@ -546,7 +646,6 @@ function handleJoin(ws, msg) {
     sendError(ws, '你已经在一个房间中了');
     return;
   }
-  const name = String(msg.name || '').trim().slice(0, 12) || '玩家';
   const code = String(msg.room || '').trim();
   if (!/^\d{4}$/.test(code)) {
     sendError(ws, '房间号应为4位数字');
@@ -554,15 +653,34 @@ function handleJoin(ws, msg) {
   }
   let room = rooms.get(code);
   if (!room) {
-  room = { code, players: {}, names: {}, game: null, match: null, stats: { matchWins: { ns: 0, ew: 0 } }, nextStart: null };
+    room = { code, players: {}, names: {}, game: null, match: null, stats: { matchWins: { ns: 0, ew: 0 } }, nextStart: null };
     rooms.set(code, room);
   }
-  const freeSeat = SEATS.find((s) => !room.players[s]);
-  if (!freeSeat) {
-    sendError(ws, '房间已满，无法加入');
+  const token = String(msg.token || '');
+  const finishJoin = (effectiveName) => {
+    const freeSeat = SEATS.find((s) => !room.players[s]);
+    if (!freeSeat) {
+      sendError(ws, '房间已满，无法加入');
+      return;
+    }
+    assignSeat(room, ws, effectiveName, freeSeat);
+  };
+  if (token) {
+    // 已登录：验证 token，绑定账号身份；昵称优先用输入的，其次用账号昵称
+    usersStore.findUserByToken(token).then((user) => {
+      if (user) {
+        ws.account = user.username;
+        usersStore.updateLastLogin(user.username).catch(() => {});
+        const nm = String(msg.name || '').trim().slice(0, 12) || user.nickname;
+        finishJoin(nm);
+      } else {
+        send(ws, { type: 'notice', text: '登录已失效，将以游客身份加入' });
+        finishJoin(String(msg.name || '').trim().slice(0, 12) || '玩家');
+      }
+    }).catch(() => finishJoin(String(msg.name || '').trim().slice(0, 12) || '玩家'));
     return;
   }
-  assignSeat(room, ws, name, freeSeat);
+  finishJoin(String(msg.name || '').trim().slice(0, 12) || '玩家');
 }
 
 function performCall(room, seat, score) {
@@ -931,37 +1049,50 @@ function handleClose(ws) {
 /** 断线重连：按 playerId 找回座位，恢复状态快照。 */
 function handleReconnect(ws, msg) {
   const pid = String(msg.playerId || '');
-  if (!pid) {
-    sendError(ws, '缺少玩家标识，无法恢复对局');
+  const token = String(msg.token || '');
+  const restore = (room, seat, rec) => {
+    rec.ws = ws;
+    rec.online = true;
+    rec.offlineAt = null;
+    if (rec.autoTimer) { clearTimeout(rec.autoTimer); rec.autoTimer = null; }
+    if (rec.kickTimer) { clearTimeout(rec.kickTimer); rec.kickTimer = null; }
+    ws.roomCode = room.code;
+    ws.seat = seat;
+    ws.playerId = pid;
+    const name = room.names[seat] || '玩家';
+    if (room.game) {
+      // 恢复完整状态：公共状态 + 自己的手牌
+      send(ws, { type: 'state_sync', seat, hand: room.game.hands[seat], public: publicState(room) });
+      broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已重连` });
+      broadcastState(room);
+    } else {
+      send(ws, { type: 'game_ended', reason: '对局已结束，请重新开始' });
+      send(ws, { type: 'state', public: publicState(room) });
+    }
+  };
+  const scan = (match) => {
+    for (const room of rooms.values()) {
+      for (const seat of SEATS) {
+        const rec = room.players[seat];
+        if (rec && match(rec, seat)) return restore(room, seat, rec);
+      }
+    }
+    return false;
+  };
+  const finish = () => {
+    // 优先按账号匹配（跨设备），其次按 playerId 匹配（同浏览器）
+    if (ws.account && scan((rec) => rec.account === ws.account)) return;
+    if (pid && scan((rec) => rec.playerId === pid)) return;
+    sendError(ws, '无法恢复对局，请刷新页面重新进入房间');
+  };
+  if (token) {
+    usersStore.findUserByToken(token).then((user) => {
+      if (user) ws.account = user.username;
+      finish();
+    }).catch(() => finish());
     return;
   }
-  for (const room of rooms.values()) {
-    for (const seat of SEATS) {
-      const rec = room.players[seat];
-      if (!rec || rec.playerId !== pid) continue;
-      // 重新绑定连接
-      rec.ws = ws;
-      rec.online = true;
-      rec.offlineAt = null;
-      if (rec.autoTimer) { clearTimeout(rec.autoTimer); rec.autoTimer = null; }
-      if (rec.kickTimer) { clearTimeout(rec.kickTimer); rec.kickTimer = null; }
-      ws.roomCode = room.code;
-      ws.seat = seat;
-      ws.playerId = pid;
-      const name = room.names[seat] || '玩家';
-      if (room.game) {
-        // 恢复完整状态：公共状态 + 自己的手牌
-        send(ws, { type: 'state_sync', seat, hand: room.game.hands[seat], public: publicState(room) });
-        broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已重连` });
-        broadcastState(room);
-      } else {
-        send(ws, { type: 'game_ended', reason: '对局已结束，请重新开始' });
-        send(ws, { type: 'state', public: publicState(room) });
-      }
-      return;
-    }
-  }
-  sendError(ws, '无法恢复对局，请刷新页面重新进入房间');
+  finish();
 }
 
 /** 有人离线等太久时，在线玩家可主动结束对局，回到等待状态并选择接续方式。 */
@@ -1145,6 +1276,57 @@ const MIME_TYPES = {
 };
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
 
+function sendJson(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+}
+
+function readJsonBody(req, cb) {
+  let body = '';
+  req.on('data', (c) => { body += c; if (body.length > 10000) req.destroy(); });
+  req.on('end', () => { try { cb(JSON.parse(body || '{}')); } catch (e) { cb(null); } });
+  req.on('error', () => {});
+}
+
+async function handleRegister(res, body) {
+  try {
+    const username = String((body && body.username) || '').trim();
+    const password = String((body && body.password) || '');
+    const nickname = String((body && body.nickname) || '').trim().slice(0, 12) || '玩家';
+    if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) return sendJson(res, 400, { error: '账号需为3-20位字母/数字/下划线' });
+    if (password.length < 6 || password.length > 64) return sendJson(res, 400, { error: '密码长度需为6-64位' });
+    const existing = await usersStore.findUserByUsername(username);
+    if (existing) return sendJson(res, 409, { error: '账号已存在' });
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash(password, 10);
+    await usersStore.createUser({ username, passwordHash: hash, nickname });
+    const token = genToken();
+    await usersStore.setToken(username, token);
+    sendJson(res, 200, { token, username, nickname });
+  } catch (e) {
+    console.error('注册失败:', e);
+    sendJson(res, 500, { error: '服务器错误' });
+  }
+}
+
+async function handleLogin(res, body) {
+  try {
+    const username = String((body && body.username) || '').trim();
+    const password = String((body && body.password) || '');
+    if (!username || !password) return sendJson(res, 400, { error: '请输入账号和密码' });
+    const u = await usersStore.findUserByUsername(username);
+    const bcrypt = require('bcryptjs');
+    if (!u || !(await bcrypt.compare(password, u.passwordHash))) return sendJson(res, 401, { error: '账号或密码错误' });
+    const token = genToken();
+    await usersStore.setToken(username, token);
+    usersStore.updateLastLogin(username).catch(() => {});
+    sendJson(res, 200, { token, username, nickname: u.nickname });
+  } catch (e) {
+    console.error('登录失败:', e);
+    sendJson(res, 500, { error: '服务器错误' });
+  }
+}
+
 const server = http.createServer((req, res) => {
   let url;
   try {
@@ -1152,6 +1334,22 @@ const server = http.createServer((req, res) => {
   } catch (e) {
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Bad Request');
+    return;
+  }
+  if (url === '/api/register' && req.method === 'POST') {
+    readJsonBody(req, (body) => handleRegister(res, body));
+    return;
+  }
+  if (url === '/api/login' && req.method === 'POST') {
+    readJsonBody(req, (body) => handleLogin(res, body));
+    return;
+  }
+  if (url === '/api/me' && req.method === 'GET') {
+    const token = new URL(req.url, 'http://x').searchParams.get('token') || '';
+    usersStore.findUserByToken(token).then((u) => {
+      if (!u) return sendJson(res, 401, { error: '未登录' });
+      sendJson(res, 200, { username: u.username, nickname: u.nickname });
+    }).catch(() => sendJson(res, 500, { error: '服务器错误' }));
     return;
   }
   if (url === '/' || url === '/index.html') {
@@ -1249,6 +1447,7 @@ heartbeat.unref(); // 仅在测试 require 时避免挂起进程；正式运行�
 wss.on('close', () => clearInterval(heartbeat));
 
 if (require.main === module) {
+  usersStore.init().catch((e) => console.error('账号存储初始化失败:', e));
   server.listen(PORT, HOST, () => {
     console.log('盖帽/百分 服务器已启动');
     console.log(`HTTP: http://${HOST}:${PORT}  （浏览器访问）`);
