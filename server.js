@@ -657,9 +657,35 @@ function handleJoin(ws, msg) {
     rooms.set(code, room);
   }
   const token = String(msg.token || '');
+  const legacyPid = String(msg.playerId || '');
   const finishJoin = (effectiveName) => {
     const freeSeat = SEATS.find((s) => !room.players[s]);
     if (!freeSeat) {
+      // 房间满：若自己的座位还保留（断线未踢出），直接恢复该座位（刷新页面后重进也能续上）
+      for (const seat of SEATS) {
+        const rec = room.players[seat];
+        if (!rec || rec.online) continue;
+        const byPid = legacyPid && rec.playerId === legacyPid;
+        const byAcc = ws.account && rec.account === ws.account;
+        if (!byPid && !byAcc) continue;
+        rec.ws = ws;
+        rec.online = true;
+        rec.offlineAt = null;
+        if (rec.autoTimer) { clearTimeout(rec.autoTimer); rec.autoTimer = null; }
+        if (rec.kickTimer) { clearTimeout(rec.kickTimer); rec.kickTimer = null; }
+        ws.roomCode = room.code;
+        ws.seat = seat;
+        ws.playerId = rec.playerId; // 保持原 playerId，后续断线仍可识别
+        const name = room.names[seat] || effectiveName;
+        if (room.game) {
+          send(ws, { type: 'state_sync', room: room.code, seat, hand: room.game.hands[seat], public: publicState(room) });
+          broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已重连` });
+        } else {
+          send(ws, { type: 'init', room: room.code, seat, name, hand: [], playerId: rec.playerId });
+        }
+        broadcastRoom(room);
+        return;
+      }
       sendError(ws, '房间已满，无法加入');
       return;
     }
@@ -1062,7 +1088,7 @@ function handleReconnect(ws, msg) {
     const name = room.names[seat] || '玩家';
     if (room.game) {
       // 恢复完整状态：公共状态 + 自己的手牌
-      send(ws, { type: 'state_sync', seat, hand: room.game.hands[seat], public: publicState(room) });
+      send(ws, { type: 'state_sync', room: room.code, seat, hand: room.game.hands[seat], public: publicState(room) });
       broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已重连` });
       broadcastState(room);
     } else {

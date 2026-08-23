@@ -41,13 +41,26 @@
     font-size: 16px; text-align: center; outline: none;
   }
   #connectPanel input:focus { border-color: #2e7fd6; box-shadow: 0 0 0 3px rgba(46,127,214,.15); }
-  #connectPanel .auth-btns { display: flex; gap: 8px; margin-bottom: 8px; }
-  #connectPanel .auth-btns button {
-    flex: 1; padding: 9px 0; font-size: 13px; border-radius: 9px;
-    background: #546e7a; color: #fff; border: none; cursor: pointer;
+  #connectPanel .field-label { text-align: left; font-size: 12px; color: #90a4ae; margin: 6px 0 4px; }
+  #connectPanel .pw-wrap { position: relative; }
+  #connectPanel .pw-wrap input { padding-right: 42px; }
+  #connectPanel .eye-btn {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; font-size: 18px; cursor: pointer;
+    padding: 4px 6px; line-height: 1; color: #607d8b;
   }
-  #connectPanel .auth-btns button:hover { filter: brightness(1.12); }
-  #connectPanel #authStatus { font-size: 12px; color: #2e7d32; min-height: 16px; margin: -2px 0 10px; }
+  #connectPanel .eye-btn:hover { color: #2e7fd6; }
+  #connectPanel .primary-btn { width: 100%; margin-top: 14px; }
+  #connectPanel .step-link {
+    font-size: 13px; color: #2e7fd6; cursor: pointer; margin-top: 12px; text-decoration: underline;
+  }
+  #connectPanel .step-link:hover { color: #1565c0; }
+  #connectPanel .auth-bar {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 12px; color: #2e7d32; margin-bottom: 10px;
+  }
+  #connectPanel .auth-bar button { padding: 4px 10px; font-size: 12px; min-height: 28px; border-radius: 8px; background: #546e7a; color: #fff; border: none; cursor: pointer; }
+  #connectPanel .auth-bar button:hover { filter: brightness(1.12); }
   #connectPanel .btns { display: flex; gap: 12px; margin-top: 8px; }
   #connectPanel button {
     flex: 1; padding: 12px 0; border: none; border-radius: 10px;
@@ -496,19 +509,46 @@
   <div class="panel">
     <h1>盖帽 / 百分</h1>
     <div class="sub">四人联机 · 对家一队 · 单张出牌 · 翻底板百</div>
-    <input id="nameInput" placeholder="你的昵称" maxlength="12" autocomplete="off">
-    <input id="accountInput" placeholder="账号（可选，登录后断线可跨设备恢复）" maxlength="20" autocomplete="username">
-    <input id="passwordInput" type="password" placeholder="密码（至少6位）" maxlength="64" autocomplete="current-password">
-    <div class="auth-btns">
-      <button id="btnLogin" type="button">登录</button>
-      <button id="btnRegister" type="button">注册</button>
-      <button id="btnLogout" type="button" class="hidden">退出登录</button>
+    <div id="loginStep">
+      <div class="field-label">账号</div>
+      <input id="loginAccountInput" placeholder="输入账号" maxlength="20" autocomplete="username">
+      <div class="field-label">密码</div>
+      <div class="pw-wrap">
+        <input id="loginPasswordInput" type="password" placeholder="输入密码" maxlength="64" autocomplete="current-password">
+        <button type="button" class="eye-btn" id="eyeLogin">👁</button>
+      </div>
+      <button id="btnLogin" type="button" class="primary-btn">登录</button>
+      <div class="step-link" id="btnGoRegister">没有账号？去注册</div>
     </div>
-    <div id="authStatus"></div>
-    <input id="roomInput" placeholder="房间号（4位数字）" maxlength="4" autocomplete="off">
-    <div class="btns">
-      <button id="btnCreate">创建房间</button>
-      <button id="btnJoin">加入房间</button>
+    <div id="regStep" class="hidden">
+      <div class="field-label">账号</div>
+      <input id="regAccountInput" placeholder="设置账号" maxlength="20" autocomplete="username">
+      <div class="field-label">密码（至少6位）</div>
+      <div class="pw-wrap">
+        <input id="regPasswordInput" type="password" placeholder="设置密码" maxlength="64" autocomplete="new-password">
+        <button type="button" class="eye-btn" id="eyeReg1">👁</button>
+      </div>
+      <div class="field-label">确认密码</div>
+      <div class="pw-wrap">
+        <input id="regConfirmInput" type="password" placeholder="再次输入密码" maxlength="64" autocomplete="new-password">
+        <button type="button" class="eye-btn" id="eyeReg2">👁</button>
+      </div>
+      <button id="btnRegister" type="button" class="primary-btn">注册</button>
+      <div class="step-link" id="btnBackLogin">已有账号？返回登录</div>
+    </div>
+    <div id="roomStep" class="hidden">
+      <div class="auth-bar">
+        <span id="authBarText"></span>
+        <button id="btnLogout" type="button" class="hidden">退出登录</button>
+      </div>
+      <div class="field-label">昵称（仅展示用，不参与身份识别）</div>
+      <input id="nameInput" placeholder="你的昵称" maxlength="12" autocomplete="off">
+      <div class="field-label">房间号</div>
+      <input id="roomInput" placeholder="房间号（4位数字）" maxlength="4" autocomplete="off">
+      <div class="btns">
+        <button id="btnCreate">创建房间</button>
+        <button id="btnJoin">加入房间</button>
+      </div>
     </div>
     <div id="connStatus"></div>
   </div>
@@ -710,8 +750,8 @@ function saveAuth(data) {
     localStorage.setItem('gamai_account', authAccount);
   } catch (e) {}
   if (data.nickname) $('nameInput').value = data.nickname;
-  $('accountInput').value = authAccount;
-  renderAuthState();
+  $('loginAccountInput').value = authAccount;
+  showStep3();
 }
 
 function logout() {
@@ -721,31 +761,47 @@ function logout() {
     localStorage.removeItem('gamai_token');
     localStorage.removeItem('gamai_account');
   } catch (e) {}
-  renderAuthState();
+  showStep1();
   setConnStatus('已退出登录');
 }
 
-function renderAuthState() {
-  const logged = !!authAccount;
-  $('btnLogout').classList.toggle('hidden', !logged);
-  $('btnLogin').disabled = logged;
-  $('btnRegister').disabled = logged;
-  $('authStatus').textContent = logged ? '已登录：' + authAccount + '（断线可恢复）' : '';
+function showStep1() {
+  $('loginStep').classList.remove('hidden');
+  $('regStep').classList.add('hidden');
+  $('roomStep').classList.add('hidden');
+}
+
+function showStep2() { // 注册界面
+  $('loginStep').classList.add('hidden');
+  $('regStep').classList.remove('hidden');
+  $('roomStep').classList.add('hidden');
+}
+
+function showStep3() { // 登录成功后：昵称 + 房间号
+  $('loginStep').classList.add('hidden');
+  $('regStep').classList.add('hidden');
+  $('roomStep').classList.remove('hidden');
+  $('authBarText').textContent = '已登录：' + authAccount + '（断线可恢复）';
+  $('btnLogout').classList.remove('hidden');
 }
 
 function loadAuth() {
   try {
     authToken = localStorage.getItem('gamai_token') || '';
     authAccount = localStorage.getItem('gamai_account') || '';
+    playerId = localStorage.getItem('gamai_player_id') || '';
+    const savedRoom = localStorage.getItem('gamai_room') || '';
+    if (savedRoom) $('roomInput').value = savedRoom;
   } catch (e) {}
-  if (authAccount) $('accountInput').value = authAccount;
-  renderAuthState();
-  if (authToken) {
+  if (authAccount) {
+    $('loginAccountInput').value = authAccount;
+  }
+  if (authToken && authAccount) {
     api('/api/me?token=' + encodeURIComponent(authToken)).then((r) => {
       if (r.ok) {
         authAccount = r.data.username;
         if (r.data.nickname) $('nameInput').value = r.data.nickname;
-        renderAuthState();
+        showStep3();
       } else {
         logout();
       }
@@ -754,8 +810,8 @@ function loadAuth() {
 }
 
 async function doLogin() {
-  const username = $('accountInput').value.trim();
-  const password = $('passwordInput').value;
+  const username = $('loginAccountInput').value.trim();
+  const password = $('loginPasswordInput').value;
   if (!username || !password) { setConnStatus('请输入账号和密码'); return; }
   setConnStatus('登录中…');
   const r = await api('/api/login', { username, password });
@@ -768,18 +824,30 @@ async function doLogin() {
 }
 
 async function doRegister() {
-  const username = $('accountInput').value.trim();
-  const password = $('passwordInput').value;
-  const nickname = $('nameInput').value.trim() || '玩家';
-  if (!username || !password) { setConnStatus('请输入账号和密码'); return; }
+  const username = $('regAccountInput').value.trim();
+  const password = $('regPasswordInput').value;
+  const confirm = $('regConfirmInput').value;
+  if (!username || !password || !confirm) { setConnStatus('请完整填写账号和密码'); return; }
+  if (password.length < 6) { setConnStatus('密码至少需要6位'); return; }
+  if (password !== confirm) { setConnStatus('两次输入的密码不一致'); return; }
   setConnStatus('注册中…');
-  const r = await api('/api/register', { username, password, nickname });
+  const r = await api('/api/register', { username, password, nickname: '玩家' });
   if (r.ok) {
     saveAuth(r.data);
-    setConnStatus('注册成功，已自动登录：' + r.data.nickname);
+    setConnStatus('注册成功，已自动登录：' + username + '，请设置昵称并输入房间号');
   } else {
     setConnStatus((r.data && r.data.error) || '注册失败');
   }
+}
+
+function bindEye(inputId, btnId) {
+  const input = $(inputId);
+  const btn = $(btnId);
+  btn.addEventListener('click', () => {
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.textContent = show ? '🙈' : '👁';
+  });
 }
 
 function bindSocket(ws, opts) {
@@ -792,13 +860,6 @@ function bindSocket(ws, opts) {
       setTimeout(tryReconnect, 3000);
       return;
     }
-    if (opts && opts.resumeMode) {
-      // 页面加载时的自动恢复失败：回到连接面板，不做无限重试
-      $('reconnectOverlay').classList.add('hidden');
-      $('connIndicator').classList.remove('reconnecting');
-      setConnStatus('无法自动恢复对局，请重新进入房间');
-      return;
-    }
     if (mySeat) {
       startReconnect();
     } else {
@@ -806,39 +867,6 @@ function bindSocket(ws, opts) {
       $('gameScreen').classList.add('hidden');
       setConnStatus('连接已断开，请重新进入房间');
     }
-  };
-}
-
-/** 页面加载时：若浏览器里保存过 playerId，尝试直接恢复原对局。 */
-function attemptResume() {
-  let pid = '';
-  try { pid = localStorage.getItem('gamai_player_id') || ''; } catch (e) {}
-  if (!pid) return;
-  playerId = pid;
-  try {
-    const savedRoom = localStorage.getItem('gamai_room') || '';
-    if (savedRoom) $('roomInput').value = savedRoom;
-  } catch (e) {}
-  if (authToken) {
-    api('/api/me?token=' + encodeURIComponent(authToken)).then((r) => {
-      if (r.ok) {
-        authAccount = r.data.username;
-        if (r.data.nickname) $('nameInput').value = r.data.nickname;
-        renderAuthState();
-      } else {
-        logout();
-      }
-    });
-  }
-  $('connIndicator').classList.remove('hidden');
-  $('connIndicator').textContent = '🟡 重连中…';
-  $('connIndicator').classList.add('reconnecting');
-  $('reconnectOverlay').classList.remove('hidden');
-  const ws = new WebSocket(wsUrl());
-  bindSocket(ws, { resumeMode: true });
-  ws.onopen = () => {
-    socket = ws;
-    send({ type: 'reconnect', playerId, token: authToken });
   };
 }
 
@@ -856,7 +884,7 @@ function connectRoom() {
   const ws = new WebSocket(wsUrl());
   socket = ws;
   bindSocket(ws);
-  ws.onopen = () => send({ type: 'join', room, name, token: authToken });
+  ws.onopen = () => send({ type: 'join', room, name, token: authToken, playerId });
   setConnStatus('连接中…');
 }
 
@@ -926,6 +954,7 @@ function onMessage(raw) {
     case 'state_sync':
       // 断线重连后恢复完整状态
       mySeat = msg.seat;
+      if (msg.room) myRoom = msg.room;
       myHand = msg.hand || [];
       publicState = msg.public;
       $('reconnectOverlay').classList.add('hidden');
@@ -1516,14 +1545,18 @@ $('btnJoin').addEventListener('click', connectRoom);
 $('btnLogin').addEventListener('click', doLogin);
 $('btnRegister').addEventListener('click', doRegister);
 $('btnLogout').addEventListener('click', logout);
+$('btnGoRegister').addEventListener('click', () => { showStep2(); setConnStatus(''); });
+$('btnBackLogin').addEventListener('click', () => { showStep1(); setConnStatus(''); });
 $('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') connectRoom(); });
 $('roomInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') connectRoom(); });
+bindEye('loginPasswordInput', 'eyeLogin');
+bindEye('regPasswordInput', 'eyeReg1');
+bindEye('regConfirmInput', 'eyeReg2');
 $('emojiBtn').addEventListener('click', openEmojiPanel);
 $('emojiPanel').addEventListener('click', (e) => {
   if (e.target === $('emojiPanel')) closeEmojiPanel();
 });
 loadAuth();
-attemptResume();
 </script>
 </body>
 </html>
