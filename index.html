@@ -930,7 +930,7 @@ function tryReconnect() {
   bindSocket(ws, { reconnectMode: true });
   ws.onopen = () => {
     socket = ws;
-    send({ type: 'reconnect', playerId, token: authToken });
+    send({ type: 'reconnect', playerId, token: authToken, room: myRoom });
   };
 }
 

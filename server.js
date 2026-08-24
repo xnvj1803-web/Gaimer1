@@ -453,9 +453,14 @@ function assignSeat(room, ws, name, seat) {
   ws.playerId = playerId;
   ws.roomCode = room.code;
   ws.seat = seat;
-  send(ws, { type: 'init', room: room.code, seat, name, hand: [], playerId });
+  // 对局进行中：接管该座位的现有手牌继续玩；否则空手牌
+  const existingHand = room.game ? room.game.hands[seat].slice() : [];
+  send(ws, { type: 'init', room: room.code, seat, name, hand: existingHand, playerId });
   broadcastRoom(room);
-  if (SEATS.every((s) => room.players[s]) && !room.game) {
+  if (room.game) {
+    broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）加入并接管该座位（牌保留）` });
+    send(ws, { type: 'state_sync', room: room.code, seat, hand: existingHand, public: publicState(room) });
+  } else if (SEATS.every((s) => room.players[s])) {
     if (room.nextStart === 'resume') {
       room.nextStart = null;
       broadcast(room, { type: 'notice', text: '房间已满，从当前分数接续，自动发牌！' });
@@ -1052,24 +1057,11 @@ function handleClose(ws) {
     return;
   }
 
-  // 对局中：标记离线、保留数据，等待重连；2 分钟未重连则踢出并结束对局
-  rec.ws = null;
-  rec.online = false;
-  rec.offlineAt = Date.now();
-  broadcast(room, { type: 'player_offline', playerName: name, seat });
-  broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已断开连接，等待重连…（2分钟内）` });
+  // 对局中退出：直接释放座位（不保留离线状态），牌保留，等待任意玩家加入接管
+  removeSeat(room, seat);
+  broadcast(room, { type: 'notice', text: `${name}（${SEAT_LABELS[seat]}家）已离开房间，其牌保留，等待新玩家加入接管` });
   broadcastState(room);
-
-  rec.kickTimer = setTimeout(() => {
-    if (room.players[seat] !== rec || rec.online) return;
-    const leftName = room.names[seat] || seat;
-    removeSeat(room, seat);
-    room.game = null;
-    broadcast(room, { type: 'game_ended', reason: `${leftName} 离开游戏` });
-    broadcast(room, { type: 'notice', text: `${leftName} 已离开游戏，对局结束。房间等待新玩家加入` });
-    broadcastRoom(room);
-    if (!SEATS.some((s) => room.players[s])) rooms.delete(room.code);
-  }, KICK_DELAY);
+  if (!SEATS.some((s) => room.players[s])) rooms.delete(room.code);
 }
 
 /** 断线重连：按 playerId 找回座位，恢复状态快照。 */
@@ -1109,7 +1101,17 @@ function handleReconnect(ws, msg) {
     // 优先按账号匹配（跨设备），其次按 playerId 匹配（同浏览器）
     if (ws.account && scan((rec) => rec.account === ws.account)) return;
     if (pid && scan((rec) => rec.playerId === pid)) return;
-    sendError(ws, '无法恢复对局，请刷新页面重新进入房间');
+    // 座位已释放（退出即离房）：若提供了房间号且对局仍在，接管一个空座位（牌保留）
+    const code = String(msg.room || '');
+    const room = rooms.get(code);
+    if (room && room.game && room.game.phase !== 'game_over') {
+      const freeSeat = SEATS.find((s) => !room.players[s]);
+      if (freeSeat) {
+        assignSeat(room, ws, '玩家', freeSeat);
+        return;
+      }
+    }
+    sendError(ws, '无法恢复对局，请重新进入房间');
   };
   if (token) {
     usersStore.findUserByToken(token).then((user) => {
@@ -1128,19 +1130,13 @@ function handleEndGame(ws, room) {
     sendError(ws, '当前不能结束对局');
     return;
   }
-  const anyOffline = SEATS.some((s) => {
-    const r = room.players[s];
-    return r && !r.online;
-  });
-  if (!anyOffline) {
-    sendError(ws, '当前没有离线玩家，无需结束对局');
+  // 有新规则下退出即释放座位：只要有空位（有人离开未补齐），即可主动结束
+  const anyVacant = SEATS.some((s) => !room.players[s]);
+  if (!anyVacant) {
+    sendError(ws, '当前没有空位，无需结束对局');
     return;
   }
-  // 立即移除离线玩家的座位，解放房间位置
-  for (const seat of SEATS) {
-    const r = room.players[seat];
-    if (r && !r.online) removeSeat(room, seat);
-  }
+  // 座位已随退出释放，无需额外移除
   const scores = { ns: room.match.scores.ns, ew: room.match.scores.ew };
   const wins = { ns: room.stats.matchWins.ns, ew: room.stats.matchWins.ew };
   room.game = null;
@@ -1203,18 +1199,38 @@ function needsAction(room, seat) {
 function scheduleTurnAutoAct(room) {
   const g = room.game;
   if (!g) return;
+  // 空座自动托管：座位已有人接管或不再需要操作时取消
+  if (g.vacantTimer && g.vacantSeat) {
+    const vs = g.vacantSeat;
+    if (room.players[vs] || !needsAction(room, vs)) {
+      clearTimeout(g.vacantTimer);
+      g.vacantTimer = null;
+      g.vacantSeat = null;
+    }
+  }
   for (const seat of SEATS) {
     const rec = room.players[seat];
-    if (!rec || rec.online) continue;
+    const vacant = !rec;
+    if (!vacant && rec.online) continue;
     if (needsAction(room, seat)) {
-      if (!rec.autoTimer) {
+      if (vacant) {
+        // 玩家离开且无人接管：30秒后自动托管，保证游戏继续
+        if (!g.vacantTimer) {
+          g.vacantSeat = seat;
+          g.vacantTimer = setTimeout(() => {
+            g.vacantTimer = null;
+            g.vacantSeat = null;
+            if (room.game === g && !room.players[seat] && needsAction(room, seat)) autoAct(room, seat);
+          }, AUTO_ACT_DELAY);
+        }
+      } else if (!rec.autoTimer) {
         rec.autoTimer = setTimeout(() => {
           rec.autoTimer = null;
           if (!room.players[seat] || rec.online || !needsAction(room, seat)) return;
           autoAct(room, seat);
         }, AUTO_ACT_DELAY);
       }
-    } else if (rec.autoTimer) {
+    } else if (rec && rec.autoTimer) {
       clearTimeout(rec.autoTimer);
       rec.autoTimer = null;
     }
@@ -1255,7 +1271,10 @@ function autoAct(room, seat) {
   const g = room.game;
   if (!g) return;
   const name = room.names[seat] || SEAT_LABELS[seat] + '家';
-  broadcast(room, { type: 'notice', text: `${name} 已离线，系统自动操作…` });
+  broadcast(room, {
+    type: 'notice',
+    text: room.players[seat] ? `${name} 已离线，系统自动操作…` : `${name} 座位空缺，系统自动托管…`
+  });
   try {
     switch (g.phase) {
       case 'bidding':
